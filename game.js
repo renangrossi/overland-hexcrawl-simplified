@@ -55,6 +55,7 @@ function climate(terr){
 
 // ---------- hex geometry (axial, pointy-top) ----------
 const DIRS = [[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
+const DIRN = ['east','north-east','north-west','west','south-west','south-east'];
 const key = (q,r) => q+','+r;
 const dist = (a,b) => (Math.abs(a.q-b.q)+Math.abs(a.q+a.r-b.q-b.r)+Math.abs(a.r-b.r))/2;
 const nbrs = h => DIRS.map(d => ({q:h.q+d[0], r:h.r+d[1]}));
@@ -153,7 +154,7 @@ const opp = i => (i+3)%6;
 const edgeKey = (h,i) => { const n=nbrs(h)[i]; return key(n.q,n.r); };
 async function riverExit(h, avoid){
   for (let tries=0; tries<12; tries++){
-    const e = (await die('River: exit edge (1 east, then counter-clockwise)','1d6'))-1;
+    const e = (await die('River: exit edge (1 E · 2 NE · 3 NW · 4 W · 5 SW · 6 SE)','1d6'))-1;
     if (avoid.includes(e)){ log('That is where it came from: reroll.'); continue; }
     const t = hexAt(nbrs(h)[e]);
     if (t && t.terr && t.terr!=='Sea / Lake' && !t.river){ log('That edge leads into a known hex with no river: reroll.'); continue; }
@@ -416,7 +417,9 @@ async function move_(k){
     if (v>=dc) log('On course.','good');
     else {
       log('<b class="bad">Lost the way.</b> '+T('Navigation').rows[1][2]);
-      const e = await die('Drift: which edge (1 east, then counter-clockwise)', '1d6'); dest = nbrs(G.pos)[e-1]; k=key(dest.q,dest.r);
+      const meant = DIRN[nbrs(G.pos).findIndex(n=>n.q===q&&n.r===rr)];
+      const e = await die('Drift: which edge (1 E · 2 NE · 3 NW · 4 W · 5 SW · 6 SE)', '1d6'); dest = nbrs(G.pos)[e-1]; k=key(dest.q,dest.r);
+      log(`<b>You aimed ${meant} but wander ${DIRN[e-1]}.</b>`,'bad');
       if (G.weather.band==='Stormy') { log(T('Navigation').rows[3][2],'bad'); G.stormDrift=true; }
     }
   } else if (!known) log(alongRiver(from,toP)?'You follow the river: no navigation check.':'The road leads the way: no navigation check.');
