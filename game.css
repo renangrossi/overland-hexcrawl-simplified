@@ -45,3 +45,7 @@ button.main{background:var(--acc);color:#fff;border-color:var(--acc)}
 button.roll{font-size:17px;padding:10px 16px;width:100%}
 .river{stroke:#3f7fc0;stroke-width:4;stroke-linecap:round;pointer-events:none}
 .tag{font:10px Cond;fill:#3b2b1a;text-anchor:middle;pointer-events:none}
+.tname{font:9px Cond;fill:#2a2118;opacity:.75;text-anchor:middle;pointer-events:none;text-transform:uppercase;letter-spacing:.05em}
+.trail{fill:none;stroke:var(--acc);stroke-width:2.5;stroke-dasharray:3 4;opacity:.8;pointer-events:none}
+.here{fill:none;stroke:var(--acc);stroke-width:3.5;pointer-events:none}
+.hex{stroke:#0005}

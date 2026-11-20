@@ -40,8 +40,8 @@ const TERR = {
   'Mountains':{c:'#8a7d70',mc:2,col:3,be:'Mountain',ic:'🏔'},
   'Jungle':{c:'#3f7d4a',mc:2,col:4,be:'Forest & Jungle',ic:'🌴'},
   'Swamp':{c:'#6c7a58',mc:2,col:5,be:'Swamp',ic:'〰'},
-  'Desert':{c:'#e2c784',mc:1,col:6,be:'Desert',ic:'☀'},
-  'Glacier':{c:'#dfe9ee',mc:2,col:7,be:'Glacier',ic:'❄'},
+  'Desert':{c:'#e8b95a',mc:1,col:6,be:'Desert',ic:'☀'},
+  'Glacier':{c:'#a9cfe0',mc:2,col:7,be:'Glacier',ic:'❄'},
   'Sea / Lake':{c:'#6d9fc4',mc:99,col:8,be:'Sea/Lake',ic:'≈'},
 };
 const SEASONS = ['Spring','Summer','Fall','Winter'];
@@ -225,11 +225,13 @@ function render(){
       const ic = h.feature==='Settlement'?'🏰':h.feature&&!/Empty/.test(h.feature)?'✦':TERR[h.terr].ic;
       if (ic) s+=`<text class="icon" x="${c.x}" y="${c.y}">${ic}</text>`;
       if (h.river){ for (const i of [h.river.out, ...h.river.ins]) if (i!==null && i!==undefined){ const n=nbrs(h)[i], d=px(n); roads+=`<line class="river" x1="${c.x}" y1="${c.y}" x2="${(c.x+d.x)/2}" y2="${(c.y+d.y)/2}"/>`; } }
+      s+=`<text class="tname" x="${c.x}" y="${c.y-S*.5}">${h.terr==='Sea / Lake'?'water':h.terr.toLowerCase()}</text>`;
       if (h.muddy||h.hard||h.short) s+=`<text class="tag" x="${c.x}" y="${c.y+S*.55}">${h.muddy?'mud':h.hard?'hard':'shortcut'}</text>`;
       if (h.road) for (const n of nbrs(h)){ const o=G.hexes[key(n.q,n.r)]; if(o&&o.seen&&o.road){const d=px(o); roads+=`<line class="road" x1="${c.x}" y1="${c.y}" x2="${(c.x+d.x)/2}" y2="${(c.y+d.y)/2}"/>`;} }
     } else if (h.known) s+=`<text class="icon" x="${c.x}" y="${c.y}">🏰</text>`;
   }
-  s += roads + `<circle cx="${P.x}" cy="${P.y}" r="9" fill="${'var(--acc)'}" stroke="#fff" stroke-width="2"/>`;
+  const tr=(G.trail||[]).map(p=>{const q=px(p);return q.x.toFixed(1)+','+q.y.toFixed(1);}).join(' ');
+  s += roads + (tr?`<polyline class="trail" points="${tr}"/>`:'') + `<polygon class="here" points="${corners(P)}"/>` + `<circle cx="${P.x}" cy="${P.y}" r="9" fill="${'var(--acc)'}" stroke="#fff" stroke-width="2"/>`;
   svg.innerHTML = s;
   svg.querySelectorAll('.hex.reach').forEach(e=>e.onclick=()=>move(e.dataset.k));
   // HUD + party
@@ -442,7 +444,7 @@ async function enterHex(dest, from, free){
     }
   }
   if (G.stormDrift){ G.stormDrift=false; G.mc = budget(); }
-  G.prev = {...G.pos}; G.pos = {q:h.q, r:h.r};
+  G.prev = {...G.pos}; G.pos = {q:h.q, r:h.r}; (G.trail=G.trail||[{...G.prev}]).push({...G.pos});
   if (G.patrol && !h.road){ G.patrol=0; log('You leave the road; the patrol rides on without you.'); }
   log(`→ <b>${h.terr}</b>${h.road?' along the road':''}. (MC ${Math.min(G.mc,budget())}/${budget()})`); render();
   if (h.feature==='Settlement' && h.band==='City' && dist(h,G.goal)===0) return win();
