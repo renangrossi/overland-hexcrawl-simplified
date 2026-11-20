@@ -1,0 +1,13 @@
+@media screen{
+ html{background:#d9d4ca}
+ body{max-width:210mm;margin:0 auto 60px;background:#fff;padding:10mm;box-shadow:0 0 12px #0004}
+ img{max-width:100%;height:auto}
+ .rollbtn{font:600 9pt sans-serif;margin-right:4px;padding:1px 6px;cursor:pointer;border:1px solid #333;border-radius:4px;background:#f6efe0}
+ .rollout{font-weight:700;color:#a00}
+ tr.hit td{background:#ffe08a!important;outline:2px solid #c90}
+ #tray{position:fixed;bottom:0;left:0;right:0;background:#222;color:#fff;padding:6px;text-align:center;z-index:9}
+ #tray button{margin:2px;padding:4px 9px;cursor:pointer}
+ #tray b{margin-left:10px;font-size:14pt}
+ @media(max-width:700px){body{padding:3mm} .cols2,.cols3{display:block!important} body *{column-count:1!important}}
+}
+@media print{.rollbtn,.rollout,#tray{display:none}}
