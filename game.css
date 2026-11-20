@@ -38,3 +38,4 @@ button.main{background:var(--acc);color:#fff;border-color:var(--acc)}
 .road{stroke:#7a5a2a;stroke-width:4;stroke-dasharray:6 4;fill:none;pointer-events:none}
 .icon{font-size:18px;pointer-events:none;text-anchor:middle;dominant-baseline:central}
 @media(max-width:860px){main{grid-template-columns:1fr;height:auto}#mapwrap{height:55vh}#log{max-height:45vh}}
+#modal[hidden]{display:none}

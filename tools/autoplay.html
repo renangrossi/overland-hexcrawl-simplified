@@ -4,8 +4,13 @@ const f=document.getElementById('f');let n=0,errs=[];
 f.onload=()=>{f.contentWindow.onerror=(m,s,l)=>errs.push(m+' @'+l);f.contentWindow.addEventListener('unhandledrejection',e=>errs.push(String(e.reason&&e.reason.stack)));
 const d=f.contentDocument;const step=()=>{n++;
  const m=d.getElementById('modal');
- if(!m.hidden){const b=[...d.querySelectorAll('#mbox button')];const pref=b.find(x=>/Set out|Leave|Fight|New journey/.test(x.textContent)&&Math.random()<.7)||b[Math.floor(Math.random()*b.length)];if(n<4){const r=b.find(x=>/Ration/.test(x.textContent));r&&r.click();r&&r.click();} pref&&pref.click();}
+ if(!m.hidden){const b=[...d.querySelectorAll('#mbox button')];const pref=b.find(x=>/Roll a random|Set out|Leave|Fight|New journey/.test(x.textContent)&&Math.random()<.7)||b[Math.floor(Math.random()*b.length)];if(n<4){const r=b.find(x=>/Ration/.test(x.textContent));r&&r.click();r&&r.click();} pref&&pref.click();}
  else{const h=[...d.querySelectorAll('.hex.reach')];const camp=d.querySelector('#actions button.main');
   if(Math.random()<.25||!h.length)camp&&camp.click();else{const x=h[Math.floor(Math.random()*h.length)];x.dispatchEvent(new MouseEvent('click'))}}
- if(n<600)setTimeout(step,5);else document.getElementById('out').textContent='ERRS:'+JSON.stringify(errs.concat(f.contentWindow.__errs||[]))+'BTNS:'+[...d.querySelectorAll('#mbox button')].map(b=>b.textContent).join('/')+' HIDDEN:'+d.getElementById('modal').hidden+' ACT:'+d.getElementById('actions').innerText+' N:'+n+' G:'+JSON.stringify({...f.contentWindow.__G(),hexes:0,road:0})+'\n'+d.getElementById('hud').innerText+'\n'+d.getElementById('log').innerText.slice(-3000)};setTimeout(step,300)};
+ if(n<800)setTimeout(step,5);else document.getElementById('out').textContent='ERRS:'+JSON.stringify(errs.concat(f.contentWindow.__errs||[]).concat(f.contentWindow.__cm||[]))+'BTNS:'+[...d.querySelectorAll('#mbox button')].map(b=>b.textContent).join('/')+' HIDDEN:'+d.getElementById('modal').hidden+' ACT:'+d.getElementById('actions').innerText+' N:'+n+' G:'+JSON.stringify({...f.contentWindow.__G(),hexes:0,road:0})+'\n'+d.getElementById('hud').innerText+'\n'+d.getElementById('log').innerText.slice(-3000)};setTimeout(step,300)};
+</script>
+<script>
+// after the run, try one camp directly and report what happens
+setTimeout(()=>{const w=f.contentWindow,d=f.contentDocument;const before=w.__G().day;const p=d.querySelector('#actions button.main');p&&p.click();
+setTimeout(()=>{document.getElementById('out').textContent+='\nPOST: day '+before+'→'+w.__G().day+' hidden '+d.getElementById('modal').hidden+' errs '+JSON.stringify(w.__errs||[]).slice(0,800)},500)},200000);
 </script>

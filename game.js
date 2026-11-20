@@ -60,6 +60,48 @@ const nbrs = h => DIRS.map(d => ({q:h.q+d[0], r:h.r+d[1]}));
 
 // ---------- state ----------
 let G;
+// ---------- characters (Shadowdark core: 3d6 stats, class HD + CON, 2d6×5 gp) ----------
+const mod = v => v<=3?-4:v<=5?-3:v<=7?-2:v<=9?-1:v<=11?0:v<=13?1:v<=15?2:v<=17?3:4;
+const HD = {Fighter:8,Priest:6,Thief:4,Wizard:4,Ranger:8,Bard:6,Knight:8,Seer:6,Witch:4,Warlock:6,'Basilisk Warrior':12,'Desert Rider':8,'Pit Fighter':8,'Sea Wolf':8,'Ras-Godai':6};
+function makeChar(o){
+  const st=o.stats; const cls=o.cls; const m=k=>mod(st[k]);
+  const melee = /Thief|Ranger|Desert/.test(cls)?m('DEX'):m('STR');
+  const ac = o.ac || ({Fighter:15,Knight:17,Priest:15,Thief:13,Ranger:13,Bard:13}[cls]||11)+(/Fighter|Knight|Priest/.test(cls)?0:m('DEX'));
+  const hp = o.hp || Math.max(1, r(HD[cls]||6)+m('CON'));
+  return {name:o.name, cls, anc:o.anc||'', lv:o.lv||1, hp, max:hp, ac, stats:st,
+    atk: (/Wizard|Witch|Seer/.test(cls)?m('INT'):melee) + (cls==='Fighter'?1:0) + Math.floor((o.lv||1)/2),
+    dmg: /Wizard|Witch/.test(cls)?'1d6':/Fighter|Knight|Ranger/.test(cls)?'1d8':/Thief/.test(cls)?'1d6':'1d6',
+    int: m('INT'), dex:m('DEX'), cha:m('CHA'), con:st.CON, conMax:st.CON, gold:o.gold};
+}
+function randomChar(cls){
+  const st={}; for(const k of ['STR','DEX','CON','INT','WIS','CHA']) st[k]=roll('3d6');
+  const anc=['Human','Human','Human','Dwarf','Elf','Halfling','Half-Orc','Goblin'][r(8)-1];
+  return makeChar({name:name(), cls, anc, stats:st, gold:roll('2d6')*5});
+}
+// Shadowdarklings JSON export (Download → JSON). Tolerant of field names.
+function fromSDL(j){
+  const s=j.stats||j.attributes||{}; const g=k=>+(s[k]??s[k.toLowerCase()]??10);
+  const st={STR:g('STR'),DEX:g('DEX'),CON:g('CON'),INT:g('INT'),WIS:g('WIS'),CHA:g('CHA')};
+  const gold=(+j.gold||0)+(+j.silver||0)/10+(+j.copper||0)/100;
+  return makeChar({name:j.name||name(), cls:j.class||j.className||'Fighter', anc:j.ancestry||'', lv:+j.level||1, stats:st,
+    hp:+(j.maxHitPoints||j.hitPoints||j.hp)||0, ac:+(j.armorClass||j.ac)||0, gold:Math.floor(gold)});
+}
+function chooseParty(){
+  const commit = list => { G.party=list; G.gold=list.reduce((a,c)=>a+(c.gold||0),0);
+    log(`The company pools its purse: <b>${G.gold} gp</b> (${list.map(c=>c.name.split(' ')[0]+' '+(c.gold||0)).join(', ')}).`); shop(true); };
+  modal(`<h2>Your company</h2>
+   <p>Make your characters at <a href="https://shadowdarklings.net" target="_blank">shadowdarklings.net</a>, then <b>Download → JSON</b> for each and load the files here (up to 6). Or roll a random level-1 company by the core rules: 3d6 in order, class hit die + CON, 2d6×5 gp each.</p>
+   <p><input type="file" id="sdl" accept=".json,application/json" multiple></p><p id="sdlmsg"></p>`,
+   [['Roll a random company', ()=>commit(['Fighter','Priest','Thief','Wizard'].map(randomChar))],
+    ['Load Shadowdarklings files', ()=>{
+      const fs=[...document.getElementById('sdl').files].slice(0,6);
+      if(!fs.length){ document.getElementById('sdlmsg').textContent='Choose one or more .json files first.'; return; }
+      Promise.all(fs.map(f=>f.text())).then(ts=>{ try{
+        const list=ts.flatMap(t=>{const j=JSON.parse(t); return Array.isArray(j)?j:[j];}).map(fromSDL);
+        closeModal(); commit(list);
+      }catch(e){ document.getElementById('sdlmsg').textContent='Could not read: '+e.message; } });
+    }, true]]);
+}
 const CLASSES = {
   Fighter:{hp:10,ac:15,atk:3,dmg:'1d8',int:-1},
   Priest:{hp:8,ac:14,atk:2,dmg:'1d6',int:0,heal:true},
@@ -72,10 +114,9 @@ function name(){
   return pick(f, r(100))[0] + ' ' + (p?p[0]:'').replace(/-$/,'') + (s?s[0]:'').replace(/^-/,'');
 }
 function newGame(){ window.__G=()=>G;
-  G = {day:1, season:r(3)-1, gold:60, rations:12, torches:6, mounts:0, loot:[], xp:0, clues:0,
+  G = {day:1, season:r(3)-1, gold:0, rations:12, torches:6, mounts:0, loot:[], xp:0, clues:0,
        hexes:{}, pos:{q:0,r:0}, goal:{q:14,r:-3+r(5)}, mc:0, weather:null, wdays:0, buffs:{}, factions:{},
-       party:Object.keys(CLASSES).map(c => { const k=CLASSES[c]; const con=8+r(6);
-         return {name:name(), cls:c, lv:1, hp:k.hp, max:k.hp, ac:k.ac, atk:k.atk, dmg:k.dmg, int:k.int, con, conMax:con}; }),
+       party:[],
        over:false};
   // the road: a meandering line from start to goal
   let h = {...G.pos}; G.road = new Set([key(h.q,h.r)]);
@@ -87,7 +128,7 @@ function newGame(){ window.__G=()=>G;
   makeHex(G.goal,'Grasslands'); Object.assign(G.hexes[key(G.goal.q,G.goal.r)],{feature:'Settlement',band:'City',fname:'the City of '+name().split(' ')[1],known:true,fog:true});
   $('#log').innerHTML='';
   log(`<b>${G.season===0?'Spring':SEASONS[G.season]}.</b> Your company sets out from <b>Startown</b>. Somewhere east, ${hexAt(G.goal).fname} waits. Follow the road, or strike out across the wilds.`);
-  shop(true);
+  chooseParty();
 }
 const hexAt = p => G.hexes[key(p.q,p.r)];
 function makeHex(p, force){
@@ -138,8 +179,8 @@ function render(){
   svg.querySelectorAll('.hex.reach').forEach(e=>e.onclick=()=>move(e.dataset.k));
   // HUD + party
   const w = G.weather;
-  $('#hud').textContent = `Day ${G.day} · ${SEASONS[G.season]} · ${here.terr}${here.road?' (road)':''} · ${w?w.name+' — '+w.band:''} · MC ${G.mc}/${budget()} · ${dist(G.pos,G.goal)} hexes to the City`;
-  $('#party').innerHTML = `<table><tr><th>Name</th><th>Class</th><th>LV</th><th>HP</th><th>AC</th><th>CON</th></tr>${G.party.map(c=>`<tr class="${c.hp<=0||c.con<=0?'dead':''}"><td>${c.name}</td><td>${c.cls}</td><td>${c.lv}</td><td>${c.hp}/${c.max}</td><td>${c.ac}</td><td>${c.con}/${c.conMax}</td></tr>`).join('')}</table>
+  $('#hud').textContent = `Day ${G.day} · ${SEASONS[G.season]} · ${here.terr}${here.road?' (road)':''} · ${w?w.name+' — '+w.band:''} · MC ${Math.min(G.mc,budget())}/${budget()} · ${dist(G.pos,G.goal)} hexes to the City`;
+  $('#party').innerHTML = `<table><tr><th>Name</th><th>Class</th><th>LV</th><th>HP</th><th>AC</th><th>CON</th></tr>${G.party.map(c=>`<tr class="${c.hp<=0||c.con<=0?'dead':''}"><td>${c.name}</td><td>${c.anc?c.anc+' ':''}${c.cls}</td><td>${c.lv}</td><td>${c.hp}/${c.max}</td><td>${c.ac}</td><td>${c.con}/${c.conMax}</td></tr>`).join('')}</table>
    <div class="res"><span>💰 ${G.gold} gp</span><span>🍖 ${G.rations} rations</span><span>🔥 ${G.torches} torches</span><span>🐎 ${G.mounts} mounts</span><span>🎒 ${G.loot.length} loot (${G.loot.reduce((a,b)=>a+b.gp,0)} gp)</span><span>⭐ ${G.xp} XP</span><span>🗝 ${G.clues} clues</span></div>`;
   const acts = $('#actions'); acts.innerHTML='';
   const btn = (t,f,cls,dis) => { const b=document.createElement('button'); b.textContent=t; b.onclick=f; if(cls)b.className=cls; b.disabled=!!dis; acts.appendChild(b); };
@@ -186,7 +227,8 @@ function applyText(txt){
 }
 
 // ---------- move (§2) ----------
-async function move(k){
+async function move(k){ try { return await move_(k); } catch(e){ console.error(e); (window.__errs=window.__errs||[]).push(e.stack); render(); } }
+async function move_(k){
   if (G.over) return;
   if (G.weather && G.weather.band==='Severe'){ log('Severe weather: no travel today. Make camp.','bad'); return; }
   let [q,rr] = k.split(',').map(Number); let dest = {q,r:rr};
@@ -259,14 +301,14 @@ async function hexEvent(h){
   if (/^Quiet/.test(txt)) return;
   if (/^Divine favour/.test(txt)) { G.buffs.favour=1; return; }
   if (/^Hidden chest/.test(txt)) { G.clues++; const tv=r(100); gainLoot(pick(T('Treasure 0–3'),tv)[0],'Treasure 0–3',tv); return; }
-  if (/^Dragon/.test(txt)) { const dc=/Forest|Jungle|Swamp|Mountains/.test(h.terr)?12:15; const k=check(best(c=>c.cls==='Thief'?2:0),dc); log(tag('DEX DC '+dc,k.tot)+(k.ok?'You hide; the shadow passes.':'<b>It stoops.</b> Fire washes the column.')); if(!k.ok) for(const c of alive()) hurt(c, roll('2d6'),'dragonfire'); return; }
+  if (/^Dragon/.test(txt)) { const dc=/Forest|Jungle|Swamp|Mountains/.test(h.terr)?12:15; const k=check(best(c=>c.dex+(c.cls==='Thief'?1:0)),dc); log(tag('DEX DC '+dc,k.tot)+(k.ok?'You hide; the shadow passes.':'<b>It stoops.</b> Fire washes the column.')); if(!k.ok) for(const c of alive()) hurt(c, roll('2d6'),'dragonfire'); return; }
   if (/^Extraordinary/.test(txt)) return encounter(r(6)<=3?'WEIRD':'BOSS',h);
   if (/^Weird/.test(txt)) return encounter('WEIRD',h);
   if (/^Weather/.test(txt)) { weatherEvent(); return; }
   if (/^Biome denizens/.test(txt)) return encounter('DENIZENS',h);
   if (/^NPC/.test(txt)) return npc();
   if (/^Vermin/.test(txt)) return encounter('VERMIN',h);
-  if (/^Minions/.test(txt)) { const k=check(best(c=>c.cls==='Thief'?2:0),12); if(k.ok){log(tag('DEX DC 12',k.tot)+'You slip past unseen.');return;} return encounter('MINIONS',h); }
+  if (/^Minions/.test(txt)) { const k=check(best(c=>c.dex+(c.cls==='Thief'?1:0)),12); if(k.ok){log(tag('DEX DC 12',k.tot)+'You slip past unseen.');return;} return encounter('MINIONS',h); }
   if (/^Imperial patrol/.test(txt)) { G.buffs.patrol=1; log('An imperial patrol rides with you while you hold the road.','good'); return hexEvent(h); }
   if (/^Cave entrance/.test(txt)) { h.feature = h.feature&&h.feature!=='Empty landscape'?h.feature:'Cave'; return; }
   if (/^Trouble/.test(txt)) return trouble();
@@ -328,7 +370,7 @@ function rollFoe(type, h){
 const avgLv = () => alive().reduce((a,c)=>a+c.lv,0)/Math.max(1,alive().length);
 
 function encounter(type, h, inDungeon, ambush){
-  return new Promise(res=>{
+  return new Promise(res=>{ try {
     const f = rollFoe(type, h);
     const dist = pick(T('1. Distance'), r(6))[0], act = pick(T('2. Activity'), roll('2d6'));
     const rv = roll('2d6'); const re = pick(T('3. Reaction'), rv)[0];
@@ -340,13 +382,14 @@ function encounter(type, h, inDungeon, ambush){
       <p>Range <b>${dist}</b>. ${ambush?'<b class="bad">Ambush! They strike first.</b>':`Reaction <b>${re}</b>${hostile?' — they mean violence.':'.'}`}</p>`;
     const done = () => { checkDeath(); render(); res(); };
     const opts = [['Fight', ()=>fight(f, ambush).then(done)]];
-    if (!ambush) opts.push(['Flee', ()=>{ const k=check(best(c=>c.cls==='Thief'?2:1),dist==='Close'?15:dist==='Near'?12:9); if(k.ok){log(tag('Flee',k.tot)+'You get clear.');G.mc++;done();} else {log(tag('Flee',k.tot)+'<b>They catch you.</b>','bad'); fight(f,true).then(done);} }]);
+    if (!ambush) opts.push(['Flee', ()=>{ const k=check(best(c=>c.dex+(c.cls==='Thief'?1:0)),dist==='Close'?15:dist==='Near'?12:9); if(k.ok){log(tag('Flee',k.tot)+'You get clear.');G.mc++;done();} else {log(tag('Flee',k.tot)+'<b>They catch you.</b>','bad'); fight(f,true).then(done);} }]);
     if (!hostile) opts.push(['Let them be', ()=>{ log('You give them a wide berth.'); done(); }]);
     else if (!ambush && type!=='DENIZENS' && type!=='VERMIN') opts.push(['Pay them off (15 gp)', ()=>{ if(G.gold>=15 && r(6)>2){G.gold-=15; log('Coin changes hands. They let you go.');done();} else {log('They take nothing but blood.','bad'); fight(f,false).then(done);} }]);
     modal(html, opts);
-  });
+  } catch(e){ (window.__errs=window.__errs||[]).push('ENC '+e.stack); res(); } });
 }
-async function fight(f, theyFirst){
+async function fight(f, theyFirst){ try { return Promise.resolve(fight_(f, theyFirst)); } catch(e){ (window.__errs=window.__errs||[]).push('FIGHT '+e.stack); } }
+function fight_(f, theyFirst){
   const foes = Array.from({length:f.no},()=>({hp:f.hp}));
   let round = 0, lines=[];
   const half = Math.ceil(f.no/2);
@@ -370,7 +413,7 @@ async function fight(f, theyFirst){
   }
 }
 function levelUp(){
-  for (const c of alive()){ if (c.lv<10 && G.xp >= 25*c.lv*(c.lv+1)/2){ c.lv++; const g=r(CLASSES[c.cls].hp>=8?8:6); c.max+=g; c.hp+=g; if(c.lv%2) c.atk++; log(`⭐ <b>${c.name}</b> reaches level ${c.lv} (+${g} HP).`,'good'); } }
+  for (const c of alive()){ if (c.lv<10 && G.xp >= 25*c.lv*(c.lv+1)/2){ c.lv++; const g=Math.max(1,r(HD[c.cls]||6)+mod(c.stats?c.stats.CON:10)); c.max+=g; c.hp+=g; if(c.lv%2) c.atk++; log(`⭐ <b>${c.name}</b> reaches level ${c.lv} (+${g} HP).`,'good'); } }
 }
 
 // ---------- forage (§8.2) & camp (§8) ----------
@@ -384,12 +427,14 @@ function forage(){
   }
   G.rations += got; G.mc = Math.min(budget(), G.mc+2); log(`Foraging takes half the day (MC +2). +${got} rations.`); render();
 }
-async function camp(){
+async function camp(){ try { return await camp_(); } catch(e){ console.error(e); (window.__errs=window.__errs||[]).push(e.stack); render(); } }
+async function camp_(){
   const h = hexAt(G.pos);
   log(`Camp in the ${h.terr.toLowerCase()}.`);
   // daytime encounter checks (2 × 1-in-6) for the half-days just travelled
   for (let i=0;i<2;i++) if (r(6)===1 && alive().length){ log(tag('Encounter check','1')+'Something finds you on the road.'); await encounter(whatAppears(),h); }
   // rations
+  if (!G.weather) rollWeather();
   const mult = G.weather.harsh ? 2 : 1;
   const need = (alive().length + G.mounts) * mult;
   if (G.rations >= need){ G.rations -= need; log(`The company eats ${need} rations${mult>1?' (harsh climate)':''}.`); }
@@ -439,7 +484,7 @@ function shop(first){
       opts.push([`Sell loot (half value)`, ()=>{ let s=0; G.loot=G.loot.filter(x=>{ if(x.potion) return true; if(Math.random()<buyer){s+=Math.floor(x.gp/2);return false;} return true;}); G.gold+=s; log(`Sold loot for ${s} gp.`,'good'); draw(); }, true]);
       opts.push(['Inn: rest the night (2 gp each)', ()=>{ const c=2*alive().length; if(G.gold>=c){G.gold-=c; G.safe=true; G.party.forEach(x=>{if(x.con>0){x.hp=x.max;x.con=x.conMax;}}); G.weather={...G.weather,band:'Fair',harsh:false}; closeModal(); log('A roof, a bed, a hot meal. Everyone recovers fully.','good'); newDay(); render();} }]);
       opts.push(['Ask for news (1 gp)', ()=>{ if(G.gold<1)return; G.gold--; const v=r(20), row=pick(T('Settlement events'),v); log(tag('Settlement event 1d20',v)+`<b>${row[0]}.</b> ${row[1]}`); draw(); }, true]);
-      if (alive().length<4 && h.band!=='Post') opts.push(['Hire a sellsword (25 gp)', ()=>{ if(G.gold>=25){G.gold-=25; G.party.push({name:name(),cls:'Fighter',lv:1,hp:10,max:10,ac:14,atk:2,dmg:'1d8',int:-1,con:10,conMax:10}); log('A sellsword joins the company.','good');} draw(); }, true]);
+      if (alive().length<4 && h.band!=='Post') opts.push(['Hire a sellsword (25 gp)', ()=>{ if(G.gold>=25){G.gold-=25; const h=randomChar('Fighter'); h.gold=0; h.name+=' (sellsword)'; G.party.push(h); log('A sellsword joins the company.','good');} draw(); }, true]);
     }
     opts.push([first?'Set out':'Leave', ()=>{ closeModal(); if(first){ log('Day 1','day'); rollWeather(); } render(); }]);
     modal(html, opts);
@@ -455,7 +500,7 @@ function modal(html, opts){
     $('#modal').hidden=false; render();
   });
 }
-function closeModal(){ $('#modal').hidden=true; }
+function closeModal(){ $("#modal").hidden=true; (window.__cm=window.__cm||[]).push(new Error().stack.split("\n").slice(1,4).join(" < ")); if(window.__cm.length>5)window.__cm.shift(); }
 
 // ---------- end ----------
 function checkDeath(){
