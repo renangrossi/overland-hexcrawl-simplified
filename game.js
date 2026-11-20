@@ -1,8 +1,9 @@
 // Overland Hexcrawl — a travel game driven by the Overland Hexcrawl Simplified tables
 // and the Thematic Foe Tables & Wildland bestiary.
 (async function(){
-const TB = await (await fetch('tables.json')).json();
-const BE = await (await fetch('bestiary.json')).json();
+let TB, BE;
+try { TB = await (await fetch('tables.json')).json(); BE = await (await fetch('bestiary.json')).json(); }
+catch(e){ document.querySelector('#log').innerHTML = '<p class="bad"><b>Could not load the game data</b> (tables.json / bestiary.json). Reload the page. '+e.message+'</p>'; return; }
 const $ = s => document.querySelector(s);
 const T = cap => TB.find(t => t.cap === cap) || TB.find(t => t.cap.startsWith(cap));
 
@@ -87,10 +88,15 @@ function fromSDL(j){
     hp:+(j.maxHitPoints||j.hitPoints||j.hp)||0, ac:+(j.armorClass||j.ac)||0, gold:Math.floor(gold)});
 }
 function chooseParty(){
-  const commit = list => { G.party=list; G.gold=list.reduce((a,c)=>a+(c.gold||0),0);
-    log(`The company pools its purse: <b>${G.gold} gp</b> (${list.map(c=>c.name.split(' ')[0]+' '+(c.gold||0)).join(', ')}).`); shop(true); };
+  const commit = list => { G.chaos = !!(document.getElementById('chaos')||{}).checked; G.party=list; G.gold=list.reduce((a,c)=>a+(c.gold||0),0);
+    log(`The company pools its purse: <b>${G.gold} gp</b> (${list.map(c=>c.name.split(' ')[0]+' '+(c.gold||0)).join(', ')}).`);
+    // each starts with a crawling kit's food and light (SD core): 3 rations, 2 torches
+    G.rations = 3*list.length; G.torches = 2*list.length;
+    log(`Packs hold ${G.rations} rations and ${G.torches} torches. Spend gold at the first settlement you find.`);
+    log('Day 1','day'); busy=true; rollWeather().then(()=>{ busy=false; render(); }); render(); };
   modal(`<h2>Your company</h2>
    <p>Make your characters at <a href="https://shadowdarklings.net" target="_blank">shadowdarklings.net</a>, then <b>Download → JSON</b> for each and load the files here (up to 6). Or roll a random level-1 company by the core rules: 3d6 in order, class hit die + CON, 2d6×5 gp each.</p>
+   <p><label><input type="checkbox" id="chaos"> Chaos Mode (Solo Reference): reroll group initiative every round</label></p>
    <p><input type="file" id="sdl" accept=".json,application/json" multiple></p><p id="sdlmsg"></p>`,
    [['Roll a random company', ()=>commit(['Fighter','Priest','Thief','Wizard'].map(randomChar))],
     ['Load Shadowdarklings files', ()=>{
@@ -114,7 +120,7 @@ function name(){
   return pick(f, r(100))[0] + ' ' + (p?p[0]:'').replace(/-$/,'') + (s?s[0]:'').replace(/^-/,'');
 }
 function newGame(){ window.__G=()=>G;
-  G = {foragedBy:{}, day:1, season:r(4)-1, prev:null, conds:[], gear:{fishing:false}, gold:0, rations:12, torches:6, mounts:0, loot:[], xp:0, clues:0,
+  G = {foragedBy:{}, day:1, season:r(4)-1, prev:null, conds:[], gear:{fishing:false}, gold:0, rations:0, torches:0, mounts:0, loot:[], xp:0, clues:0,
        hexes:{}, pos:{q:0,r:0}, goal:{q:14,r:-3+r(5)}, mc:0, weather:null, wdays:0, buffs:{}, factions:{},
        party:[],
        over:false};
@@ -124,10 +130,10 @@ function newGame(){ window.__G=()=>G;
     const opts = nbrs(h).filter(n => dist(n,G.goal) < dist(h,G.goal));
     h = opts[r(opts.length)-1]; G.road.add(key(h.q,h.r));
   }
-  makeHex(G.pos,'Grasslands'); G.hexes[key(0,0)].feature='Settlement'; G.hexes[key(0,0)].band='Town'; G.hexes[key(0,0)].fname='Startown';
+  makeHex(G.pos,'Grasslands'); Object.assign(G.hexes[key(0,0)],{feature:'Empty landscape', entered:true, seen:true});
   makeHex(G.goal,'Grasslands'); Object.assign(G.hexes[key(G.goal.q,G.goal.r)],{feature:'Settlement',band:'City',fname:'the City of '+name().split(' ')[1],known:true,fog:true});
   $('#log').innerHTML='';
-  log(`<b>${G.season===0?'Spring':SEASONS[G.season]}.</b> Your company sets out from <b>Startown</b>. Somewhere east, ${hexAt(G.goal).fname} waits. Follow the road, or strike out across the wilds.`);
+  log(`<b>${G.season===0?'Spring':SEASONS[G.season]}.</b> Your company stands on a road in open grassland. Somewhere east, ${hexAt(G.goal).fname} waits. Follow the road, or strike out across the wilds.`);
   chooseParty();
 }
 const hexAt = p => G.hexes[key(p.q,p.r)];
@@ -148,7 +154,8 @@ const tag = (tbl, v) => `<span class="tb">${tbl}</span> <span class="roll">${v}<
 const alive = () => G.party.filter(c=>c.hp>0 && c.con>0);
 const best = f => Math.max(...alive().map(f));
 function check(mod, dc){ const d=r(20); return {d, ok: d+mod>=dc, tot:d+mod}; }
-function hurt(c, n, why){ c.hp=Math.max(0,c.hp-n); log(`${c.name} takes <b>${n}</b>${why?' ('+why+')':''}.${c.hp<=0?' <b class="bad">Down.</b>':''}`, 'bad'); }
+function fall(c){ if(c.hp<=0 && !c.dead && c.con>0 && !c.dying && !c.stable){ c.dying='new'; } }
+function hurt(c, n, why){ c.hp=Math.max(0,c.hp-n); fall(c); log(`${c.name} takes <b>${n}</b>${why?' ('+why+')':''}.${c.hp<=0?' <b class="bad">Down.</b>':''}`, 'bad'); }
 const anyone = () => { const a=alive(); return a[r(a.length)-1]; };
 
 // ---------- render ----------
@@ -180,7 +187,7 @@ function render(){
   // HUD + party
   const w = G.weather;
   $('#hud').textContent = `Day ${G.day} · ${SEASONS[G.season]} · ${here.terr}${here.road?' (road)':''} · ${w?w.name+' — '+w.band:''} · MC ${Math.min(G.mc,budget())}/${budget()} · ${dist(G.pos,G.goal)} hexes to the City`;
-  $('#party').innerHTML = `<table><tr><th>Name</th><th>Class</th><th>LV</th><th>HP</th><th>AC</th><th>CON</th></tr>${G.party.map(c=>`<tr class="${c.hp<=0||c.con<=0?'dead':''}"><td>${c.name}</td><td>${c.anc?c.anc+' ':''}${c.cls}</td><td>${c.lv}</td><td>${c.hp}/${c.max}</td><td>${c.ac}</td><td>${c.con}/${c.conMax}</td></tr>`).join('')}</table>
+  $('#party').innerHTML = `<table><tr><th>Name</th><th>Class</th><th>LV</th><th>HP</th><th>AC</th><th>CON</th></tr>${G.party.map(c=>`<tr class="${c.hp<=0||c.con<=0?'dead':''}"><td>${c.name}</td><td>${c.anc?c.anc+' ':''}${c.cls}</td><td>${c.lv}</td><td>${c.dying?'☠ dying ('+(c.dying==='new'?'?':c.dying)+')':c.stable?'stable 0':c.hp}/${c.max}</td><td>${c.ac}</td><td>${c.con}/${c.conMax}</td></tr>`).join('')}</table>
    <div class="res"><span>💰 ${G.gold} gp</span><span>🍖 ${G.rations} rations</span><span>🔥 ${G.torches} torches</span><span>🐎 ${G.mounts} mounts</span><span>🎒 ${G.loot.length} loot (${G.loot.reduce((a,b)=>a+b.gp,0)} gp)</span><span>⭐ ${G.xp} XP</span><span>🗝 ${G.clues} clues</span></div>`;
   save();
   const conds = G.conds.length ? '<div class="res" style="color:var(--acc)">'+G.conds.map(x=>x.label).join(' · ')+'</div>' : '';
@@ -227,7 +234,7 @@ async function checks(label, chars, modf, dc){
 // ---------- conditions (Troubles and other lingering penalties) ----------
 // {who:name|'all', kind:'checks'|'attacks'|'mc', val, ends:'rest3'|'rest'|'terrain'|'blessed'|'safe', days, label}
 function addCond(c){ G.conds.push(c); log(`<i>Condition: ${c.label}.</i>`,'bad'); }
-function condMod(c, kind){ const h=hexAt(G.pos); return G.conds.filter(x=>x.kind===kind && (x.who==='all'||x.who===c.name) && !(x.ends==='terrain' && !/Forest|Jungle|Swamp/.test(h.terr))).reduce((a,x)=>a+x.val,0); }
+function condMod(c, kind){ const h=hexAt(G.pos); return (kind==='checks'?(G.buffs.checks||0):0) + G.conds.filter(x=>x.kind===kind && (x.who==='all'||x.who===c.name) && !(x.ends==='terrain' && !/Forest|Jungle|Swamp/.test(h.terr))).reduce((a,x)=>a+x.val,0); }
 function tickConds(rested, safe){ // called at camp
   G.conds = G.conds.filter(x=>{
     if (x.ends==='rest3'){ if(rested) x.days=(x.days||0)+1; if(x.days>=3){ log(`<i>${x.label} — over after three days of rest.</i>`,'good'); return false; } }
@@ -237,6 +244,26 @@ function tickConds(rested, safe){ // called at camp
 }
 const mcPenalty = () => Math.max(0, ...G.conds.filter(x=>x.kind==='mc').map(x=>x.val), 0);
 const SAVE = {STR:c=>c.stats?mod(c.stats.STR):0, DEX:c=>c.dex||0, CON:c=>c.stats?mod(c.stats.CON):0, INT:c=>c.int||0, WIS:c=>c.stats?mod(c.stats.WIS):0, CHA:c=>c.cha||0};
+
+// ---------- dying (Shadowdark core) ----------
+// At 0 HP a character is dying for 1d4 + CON mod rounds (min 1). Each round they roll a d20: a natural 20 and
+// they rise with 1 HP. An ally can stabilize them with an INT check DC 15, or pour a healing potion.
+const dyingNow = () => G.party.filter(c=>c.dying);
+async function dyingRound(){
+  for (const c of dyingNow()){
+    if (c.dying==='new'){ const cm=mod(c.stats?c.stats.CON:10); const n=Math.max(1, await die(`${c.name} is dying — how many rounds (1d4 + CON)`, '1d4', cm)); c.dying=n; log(`${c.name} has <b>${n}</b> round(s) to be saved.`,'bad'); continue; }
+    const helpers = alive();
+    const pi = G.loot.findIndex(x=>x.potion);
+    if (helpers.length && pi>=0){ G.loot.splice(pi,1); c.hp=r(6)+1; c.dying=0; log(`${helpers[0].name} pours a healing potion: ${c.name} is back up with ${c.hp} HP.`,'good'); continue; }
+    if (helpers.length){ const hb = helpers.reduce((a,b)=>b.int>a.int?b:a);
+      const k = await checks(`${hb.name} tries to stabilize ${c.name} · INT`, [hb], x=>x.int, 15);
+      if (k[0].ok){ c.dying=0; c.stable=true; log(`${c.name} is stable: unconscious at 0 HP until a rest.`,'good'); continue; } }
+    const v = await die(`${c.name}'s death roll (natural 20 rises)`, '1d20');
+    if (v===20){ c.dying=0; c.hp=1; log(`${c.name} gasps and rises with 1 HP!`,'good'); continue; }
+    c.dying--; if (c.dying<=0){ c.dying=0; c.con=0; log(`<b>${c.name} dies.</b>`,'bad'); } else log(`${c.name}: ${c.dying} round(s) left.`,'bad');
+  }
+}
+async function resolveDying(){ let guard=0; while (dyingNow().length && guard++<20) await dyingRound(); checkDeath(); }
 
 // ---------- weather (§1) ----------
 async function rollWeather(){
@@ -259,21 +286,52 @@ async function weatherEvent(){
   const t = G.weather.band==='Stormy'||G.weather.band==='Severe' ? (/Hot|Scorch|Swelter/.test(c)?T('Hot'):T('Cold')) : T('Fair-weather events');
   const v = await die('Weather event · '+t.cap, '2d6'); const row = pick(t,v);
   log(`<b>${row[0]}.</b> ${row[1]}`);
-  await applyText(row[1]);
+  await weatherEffect(t.cap, row[0]);
 }
-// light-touch reading of effect text: damage dice, saves, MC, rations
-async function applyText(txt){
-  const save = (txt.match(/\b(STR|DEX|CON|INT|WIS|CHA)\b/)||[])[1];
-  const dmg = (txt.match(/(\d+d\d+|\b1\b) damage|or (\d+d\d+)/)||[]);
-  const amt = dmg[1]||dmg[2];
-  if (amt && save){ for (const k of await checks(save+' save', alive(), SAVE[save], 12)) if(!k.ok) hurt(k.c, await die(`Damage to ${k.c.name}`, amt)); }
-  else if (amt && /random character/.test(txt)){ const c = await whoRandom(); hurt(c, await die(`Damage to ${c.name}`, amt)); }
-  if (/Navigation DC \+3/.test(txt)){ G.buffs.haze=1; log('Navigation DC +3 today.'); }
-  if (/Forage DC −3/.test(txt)){ G.buffs.bloom=1; log('Forage DC −3 today.'); }
-  if (/Forage DC \+3/.test(txt)){ G.buffs.forageHard=1; log('Forage DC +3 today.'); }
-  if (/\+1 MC/.test(txt)){ G.mc+=1; log('The going is slower: +1 MC spent.'); }
-  const sp = txt.match(/(\d+d\d+) rations spoil/); if (sp){ const n=Math.min(G.rations, await die('Rations spoiled', sp[1])); G.rations-=n; log(`${n} rations spoil.`,'bad'); }
-  if (/Half the rations/.test(txt)){ const n=Math.ceil(G.rations/2); G.rations-=n; log(`${n} rations lost.`,'bad'); }
+// Weather events (§9.1): one explicit handler per entry. Saves are DC 12 (the book gives none).
+// Daily flags live in G.buffs and clear at dawn.
+async function saveOrDamage(stat, dmg, who){ for (const k of await checks(stat+' save', who||alive(), SAVE[stat], 12)) if(!k.ok) hurt(k.c, /d/.test(dmg)? await die(`Damage to ${k.c.name}`, dmg) : +dmg); }
+async function spoil(expr){ const n=Math.min(G.rations, await die('Rations lost', expr)); G.rations-=n; log(`${n} rations lost.`,'bad'); }
+const B = f => Object.assign(G.buffs, f);
+const WX = {
+  'Wildfire':      async()=>{ await saveOrDamage('CON','1d4'); B({noforage:1}); },
+  'Lightning storm':async()=>{ await saveOrDamage('DEX','1d6'); if(G.mounts){ const k=await checks('WIS to hold the mounts',[alive()[0]],SAVE.WIS,12); if(!k[0].ok){ G.mounts--; log('A mount bolts and is gone.','bad'); } } },
+  'Heat wave':     async()=>{ await saveOrDamage('CON','1'); B({checks:-1, forageDC:3}); },
+  'Flash flood':   async()=>{ B({mc:1}); await spoil('1d4'); },
+  'Windstorm':     async()=>{ B({mc:1, nav:3, nofire:1}); },
+  'Thunderstorm':  async()=>{ B({nav:3, nofire:1, norest:1}); },
+  'Hailstorm':     async()=>{ await saveOrDamage('DEX','1'); B({nohunt:1}); },
+  'Ground gives way':async()=>{ B({mc:1}); for (const k of await checks('DEX to keep your gear', alive(), SAVE.DEX, 12)) if(!k.ok){ if(G.torches){ G.torches--; log(`${k.c.name} loses a torch in the slide.`,'bad'); } } },
+  'Swarm':         async()=>{ B({checks:-2, norest:1}); if(/Desert|Grasslands/.test(hexAt(G.pos).terr)){ B({noforage:1}); await spoil('1d4'); } },
+  'Collapse':      async()=>{ await saveOrDamage('DEX','1d6'); B({mc:1}); },
+  'Twister':       async()=>{ await saveOrDamage('DEX','2d6'); if(G.mounts){ log(`${G.mounts} mount(s) lost.`,'bad'); G.mounts=0; } await spoil('1d4'); },
+  'Avalanche':     async()=>{ for (const k of await checks('DEX save', alive(), SAVE.DEX, 12)) if(!k.ok){ hurt(k.c, await die(`Avalanche on ${k.c.name}`,'2d6')); const d=await checks('STR to dig out',[k.c],SAVE.STR,12); if(!d[0].ok) hurt(k.c,1,'buried a round'); } B({mc:1}); },
+  'Thundersnow':   async()=>{ await saveOrDamage('DEX','1d6'); B({nav:3}); },
+  'Cold snap':     async()=>{ await saveOrDamage('CON','1'); B({needFire:1}); },
+  'Freezing rain': async()=>{ B({mc:1, iceHex:1}); if(hexAt(G.pos).terr==='Swamp') B({nofire:1}); },
+  'Ice gale':      async()=>{ B({mc:1, nav:3, nofire:1}); },
+  'Blizzard':      async()=>{ B({mc:1, nav:3, coldNight:'1'}); },
+  'Rime squall':   async()=>{ await saveOrDamage('DEX','1'); B({checks:-1}); },
+  'Freezing fog':  async()=>{ B({nav:3, nightEnc:1}); },
+  'Thin ice':      async()=>{ for (const k of await checks('DEX to stay on the ice', alive(), SAVE.DEX, 12)) if(!k.ok){ log(`${k.c.name} goes through.`,'bad'); await saveOrDamage('CON','1d6',[k.c]); } },
+  'Ice jam':       async()=>{ await WX['Flash flood'](); },
+  'Killing cold':  async()=>{ B({coldNight:'1d6', noforage:1}); },
+  'Thaw':          async()=>{ B({crossing:1}); },
+  'Haze':          async()=>{ B({nav:3}); },
+  'Fog bank':      async()=>{ B({fleeEasy:1}); },
+  'Still air':     async()=>{ B({noSurprise:1}); },
+  'Bloom':         async()=>{ B({forageDC:-3}); },
+};
+async function weatherEffect(table, name){
+  const f = WX[name]; if (!f){ log('(No mechanical effect.)'); return; }
+  const before = {...G.buffs}; await f();
+  const fx = []; const b=G.buffs;
+  if (b.mc && !before.mc){ G.mc+=b.mc; fx.push(`+${b.mc} MC`); }
+  if (b.nav) fx.push(`Navigation DC +${b.nav}`); if (b.checks) fx.push(`${b.checks} to checks today`);
+  if (b.forageDC) fx.push(`Forage DC ${b.forageDC>0?'+':''}${b.forageDC}`); if (b.noforage) fx.push('no foraging'); if (b.nohunt) fx.push('no hunting');
+  if (b.nofire) fx.push('no fire tonight'); if (b.norest) fx.push('no outdoor rest'); if (b.needFire) fx.push('no outdoor rest without a fire');
+  if (b.coldNight) fx.push(`CON or ${b.coldNight} tonight without a fire`); if (b.nightEnc) fx.push('+1-in-6 on night checks');
+  if (fx.length) log('<i>Today: '+fx.join(' · ')+'.</i>');
 }
 async function whoRandom(){ const a=alive(); if(a.length===1) return a[0]; const v=await die('Who? '+a.map((c,i)=>`${i+1} ${c.name.split(' ')[0]}`).join(' · '), '1d'+a.length); return a[v-1]; }
 
@@ -299,7 +357,7 @@ async function move_(k){
   if (from.chasm && from.chasm.includes(k)){ log('The chasm blocks that edge. Go around.','bad'); return; }
   // navigation (§2.1): only into open, unknown country; a road on the way is no check
   if (!known && !(from.road && G.road.has(k))){
-    const dc = 12 + (G.weather.band==='Stormy'?3:0) + (G.buffs.haze?3:0) + (from.hard?3:0);
+    const dc = 12 + (G.weather.band==='Stormy'?3:0) + (G.buffs.nav||0) + (from.hard?3:0);
     const nav = best(c=>c.int+condMod(c,'checks'))+(G.favour?1:0);
     const v = await die(`Navigation · INT check DC ${dc} (best INT in the company)`, '1d20', nav);
     if (v>=dc) log('On course.','good');
@@ -328,7 +386,7 @@ async function enterHex(dest, from, free){
   if (h.feature==='Settlement' && h.band==='City' && dist(h,G.goal)===0) return win();
   if (h.feature==='Settlement' && G.favour){ G.favour=0; log('Divine favour ends at the settlement.'); }
   if (!h.entered){ h.entered=true; await feature(h); await hexEvent(h); }
-  checkDeath();
+  await resolveDying();
 }
 
 // ---------- feature (§4) ----------
@@ -365,7 +423,7 @@ async function exploreFeature(h){
     }
     if (alive().length){ const tb=avgLv()>=4?'Treasure 4–6':'Treasure 0–3'; const tv=await die('The hoard · '+tb,'1d100'); gainLoot(pick(T(tb),tv)[0]); }
   }
-  checkDeath();
+  await resolveDying();
   } finally { busy=false; render(); }
 }
 function gainLoot(txt){
@@ -507,7 +565,7 @@ async function encounter(type, h, inDungeon, ambush){
   else if (!ambush && type!=='DENIZENS' && type!=='VERMIN') opts.push(['Pay them off (15 gp)', ()=>choice='pay']);
   await modal(html, opts);
   if (choice==='leave'){ log('You give them a wide berth.'); return; }
-  if (choice==='flee'){ const dc = dist==='Close'?15:dist==='Near'?12:9; const v = await die(`Flee · DEX check DC ${dc} (best DEX)`, '1d20', best(c=>c.dex+(c.cls==='Thief'?1:0)));
+  if (choice==='flee'){ const dc = (dist==='Close'?15:dist==='Near'?12:9) - (G.buffs.fleeEasy?3:0); const v = await die(`Flee · DEX check DC ${dc} (best DEX)`, '1d20', best(c=>c.dex+(c.cls==='Thief'?1:0)));
     if (v>=dc){ log('You get clear.','good'); G.mc++; return; } log('<b>They catch you.</b>','bad'); return fight(f,true); }
   if (choice==='pay'){ if (G.gold<15){ log('You have not got it.','bad'); return fight(f,false); } const v=await die('Will they take the coin? (3–6 yes)','1d6'); if(v>2){ G.gold-=15; log('Coin changes hands. They let you go.'); return; } log('They take nothing but blood.','bad'); return fight(f,false); }
   return fight(f, ambush);
@@ -518,26 +576,36 @@ async function fight(f, theyFirst){
   const half = Math.ceil(f.no/2);
   const mindless = f.b&&/Mindless|Immune to morale/.test(f.b.traits.join(' '));
   log(`<b>Combat</b> with ${f.no} × ${f.name} (AC ${f.ac}, HP ${f.hp} each, attack +${f.atk}, ${f.dmg}).`);
-  while (alive().length && foes.some(x=>x.hp>0) && round<30){
-    round++;
-    await die(`Combat · round ${round} (${foes.filter(x=>x.hp>0).length} ${f.name} standing)`, '—', 0, 'every attack this round');
-    const lines=[];
+  let lines=[];
+  // initiative (SD 82–85, solo group initiative SoD 1): one roll per side, d20 + best DEX mod; the monsters use theirs
+  const fdex = f.b ? +((f.b.stat.match(/\bD ([+-]\d+)/)||[])[1]||0) : 0;
+  const rollInit = async () => { const pv = await die('Initiative · the company (d20 + best DEX)', '1d20', best(c=>c.dex||0)); const ev = await die(`Initiative · ${f.name} (d20 + DEX ${fdex>=0?'+':''}${fdex})`, '1d20', fdex);
+    const first = pv>=ev; log(first?'<b>The company acts first.</b>':`<b>The ${f.name} act first.</b>`); return first; };
     const pturn = () => { for (const c of alive()){ const t=foes.find(x=>x.hp>0); if(!t)break;
       if (c.cls==='Priest' && c.heal!==G.day){ const w=alive().find(x=>x.hp<=x.max/3); if(w){ c.heal=G.day; const n=r(6)+1; w.hp=Math.min(w.max,w.hp+n); lines.push(`${c.name} heals ${w.name}: 1d6+1 = ${n}.`); continue; } }
       const bon=c.atk+(G.buffs.atk||0)+(G.favour?1:0)+(G.patrol&&hexAt(G.pos).road?1:0)+condMod(c,'attacks'); const d20=r(20), a=d20+bon;
       if (d20===20 || (d20!==1 && a>=f.ac)){ const d=roll(c.dmg)+(d20===20?roll(c.dmg):0); t.hp-=d; lines.push(`${c.name}: d20 ${d20}+${bon} = ${a} vs AC ${f.ac} — <b>hit</b>, ${c.dmg} → ${d}${d20===20?' (crit)':''}${t.hp<=0?' — <b>it falls</b>':''}.`); }
       else lines.push(`${c.name}: d20 ${d20}+${bon} = ${a} vs AC ${f.ac} — miss.`); } };
-    const fturn = () => { for (const x of foes) if (x.hp>0){ const a0=alive(); if(!a0.length)break; const c=a0[r(a0.length)-1]; const d20=r(20), a=d20+f.atk, ac=c.ac+(c.acB||0);
-      if (d20===20 || (d20!==1 && a>=ac)){ const d=Math.max(1,roll(f.dmg)); c.hp=Math.max(0,c.hp-d); lines.push(`<span class="bad">${f.name} → ${c.name}: d20 ${d20}+${f.atk} = ${a} vs AC ${ac} — hit, ${f.dmg} → ${d}${c.hp<=0?' — <b>down</b>':''}.</span>`);}
+    const fturn = (adv) => { for (const x of foes) if (x.hp>0){ const a0=alive(); if(!a0.length)break; const c=a0[r(a0.length)-1]; const d20=adv?Math.max(r(20),r(20)):r(20), a=d20+f.atk, ac=c.ac+(c.acB||0);
+      if (d20===20 || (d20!==1 && a>=ac)){ const d=Math.max(1,roll(f.dmg)); c.hp=Math.max(0,c.hp-d); if(c.hp<=0){ c.stable=false; fall(c); } lines.push(`<span class="bad">${f.name} → ${c.name}: d20 ${d20}+${f.atk} = ${a} vs AC ${ac} — hit, ${f.dmg} → ${d}${c.hp<=0?' — <b>down</b>':''}.</span>`);}
       else lines.push(`${f.name} → ${c.name}: d20 ${d20}+${f.atk} = ${a} vs AC ${ac} — miss.`); } };
-    if (theyFirst && round===1){ fturn(); pturn(); } else { pturn(); fturn(); }
+  if (theyFirst){ await die(`Surprise! The ${f.name} act before initiative, with advantage`, '—'); lines=[]; fturn(true); log(lines.join('<br>')); render(); if (dyingNow().length) await dyingRound(); }
+  let partyFirst = alive().length ? await rollInit() : true;
+  while (alive().length && foes.some(x=>x.hp>0) && round<30){
+    round++;
+    if (G.chaos && round>1) partyFirst = await rollInit();
+    await die(`Combat · round ${round} (${foes.filter(x=>x.hp>0).length} ${f.name} standing)`, '—', 0, 'every attack this round');
+    lines=[];
+
+    if (partyFirst){ pturn(); fturn(); } else { fturn(); pturn(); }
     log(lines.join('<br>')); render();
+    if (dyingNow().length) await dyingRound();
     const left = foes.filter(x=>x.hp>0).length;
     if (left && left<=half && f.type!=='BOSS' && !mindless && !foes.moraleDone){ foes.moraleDone=true;
       const mv = await die(`Morale · ${f.name} at half strength · WIS DC 15`, '1d20', Math.floor(f.lv/2));
       if (mv<15){ log(`<b>Morale breaks.</b> The ${f.name} scatter.`,'good'); foes.forEach(x=>x.hp=0); } else log('They hold.'); }
   }
-  checkDeath();
+  await resolveDying();
   if (alive().length && !foes.some(x=>x.hp>0)){
     const xp = f.lv*f.no; G.xp += xp; log(`Victory. +${xp} XP.`,'good');
     if (f.type!=='VERMIN' && f.type!=='DENIZENS'){ const tv=await die('Do they carry anything? (3–6 yes)','1d6'); if(tv>=3){ const tbl=f.lv>=7?'Treasure 7–9':f.lv>=4?'Treasure 4–6':'Treasure 0–3'; const v=await die(tbl,'1d100'); gainLoot(pick(T(tbl),v)[0]); } }
@@ -546,7 +614,7 @@ async function fight(f, theyFirst){
   }
 }
 function levelUp(){
-  for (const c of alive()){ if (c.lv<10 && G.xp >= 25*c.lv*(c.lv+1)/2){ c.lv++; const g=Math.max(1,r(HD[c.cls]||6)+mod(c.stats?c.stats.CON:10)); c.max+=g; c.hp+=g; if(c.lv%2) c.atk++; log(`⭐ <b>${c.name}</b> reaches level ${c.lv} (+${g} HP).`,'good'); } }
+  for (const c of alive()){ while (c.lv<10 && G.xp >= 25*c.lv*(c.lv+1)/2){ c.lv++; const g=Math.max(1,r(HD[c.cls]||6)+mod(c.stats?c.stats.CON:10)); c.max+=g; c.hp+=g; if(c.lv%2) c.atk++; log(`⭐ <b>${c.name}</b> reaches level ${c.lv} (+${g} HP).`,'good'); } }
 }
 
 // ---------- forage (§8.2) & camp (§8) ----------
@@ -561,14 +629,14 @@ async function forage(kind){
   let dc = row[col]==='—' || !row[col] ? null : +row[col];
   if (dc===null){ log(`No ${kind==='fish'?'fishing':kind==='hunt'?'hunting':'foraging'} here (— on the table).`); return; }
   if (G.weather.harsh) dc = 18;
-  if (kind==='forage' && G.buffs.bloom) dc -= 3;
-  if (kind==='forage' && G.buffs.forageHard) dc += 3;
+  if (kind==='forage' && G.buffs.forageDC) dc += G.buffs.forageDC;
+  if ((kind==='forage'&&G.buffs.noforage)||(kind==='hunt'&&G.buffs.nohunt)){ log(`The weather forbids ${kind==='hunt'?'hunting':'foraging'} today.`); return; }
   if (kind==='forage' && h.muddy) log('Muddy terrain: foraging costs double (MC +2 more).');
   const who = alive().filter(c=>!G.foragedBy[c.name]);
   if (!who.length){ log('Everyone has already tried today.'); return; }
   who.forEach(c=>G.foragedBy[c.name]=kind);
   let got = 0;
-  for (const k of await checks(`${kind[0].toUpperCase()+kind.slice(1)} · INT`, who, c=>c.int+(G.buffs.bloom&&kind==='hunt'?3:0), dc)){
+  for (const k of await checks(`${kind[0].toUpperCase()+kind.slice(1)} · INT`, who, c=>c.int, dc)){
     if (k.ok){
       if (kind==='hunt'){ const v=await die(`What ${k.c.name} brings back`,'2d6'), w=pick(T('What the hunt brings'),v); got += +w[0]; log(`${w[1]} (+${w[0]} rations)`,'good'); if(v===12){ G.rations+=got; got=0; await encounter(await whatAppears(),h); } }
       else { got += 1; log(`${k.c.name}: +1 ration.`,'good'); }
@@ -578,6 +646,7 @@ async function forage(kind){
       if (/Disadvantage/.test(txt)) addCond({who:k.c.name,kind:'checks',val:-2,ends:'rest',label:`${k.c.name}: ${txt.split('.')[0].toLowerCase()} (−2 to checks until rest)`});
       if (/lose the gear|Gear breaks/.test(txt) && kind==='fish'){ G.gear.fishing=false; log('The fishing gear is lost.','bad'); } }
   }
+  await resolveDying();
   G.rations += got; const cost = 2 + (kind==='forage'&&h.muddy?2:0); G.mc = Math.min(budget(), G.mc+cost); log(`It takes half the day (MC +${cost}). +${got} rations.`);
   } finally { busy=false; render(); }
 }
@@ -602,23 +671,23 @@ async function camp_(){
   else G.mountCon = 0;
   // fire (§8.4): 3 torches
   let fire = G.torches>=3 && G.weather.band!=='Severe' && !(G.buffs.nofire);
+  if (!fire && G.buffs.coldNight && !G.safe) await saveOrDamage('CON', G.buffs.coldNight);
   if (fire){ G.torches-=3; log('A fire burns through the night (3 torches).'); } else log('No fire tonight.','bad');
   // overnight checks
   let interrupted = false;
   if (G.safe) log('Safe walls tonight: no night checks.');
-  else for (let i=0;i<2 && alive().length;i++){ const v=await die(`Night check ${i+1} (${fire?'1':'1–2'} = encounter)`,'1d6'); if(v<=(fire?1:2)){ interrupted=true; log('Something comes in the dark.','bad'); await encounter(await whatAppears(),h, false, (await die('Do they catch you sleeping? (4–6 yes)','1d6'))>=4); } }
+  else for (let i=0;i<2 && alive().length;i++){ const th=(fire?1:2)+(G.buffs.nightEnc||0); const v=await die(`Night check ${i+1} (1${th>1?'–'+th:''} = encounter)`,'1d6'); if(v<=th){ interrupted=true; log('Something comes in the dark.','bad'); await encounter(await whatAppears(),h, false, (await die('Do they catch you sleeping? (4–6 yes)','1d6'))>=4); } }
   // rest (§8.4): eight hours and a ration. It gives back all HP and all stat damage.
-  const canRest = (G.weather.band!=='Stormy' && G.weather.band!=='Severe') || G.safe;
+  const canRest = ((G.weather.band!=='Stormy' && G.weather.band!=='Severe' && !G.buffs.norest && !(G.buffs.needFire && !fire)) || G.safe);
   if (canRest){
-    const sleepers = alive().filter(c=>fed.has(c.name));
+    await resolveDying(); const sleepers = G.party.filter(c=>!c.dead && c.con>0 && !c.dying && fed.has(c.name));
     const k = interrupted ? await checks('CON to keep the rest after the interruption', sleepers, SAVE.CON, 12) : sleepers.map(c=>({c,ok:true}));
-    for (const x of k){ if(x.ok){ x.c.hp=x.c.max; x.c.con=x.c.conMax; } else log(`${x.c.name}'s rest is broken: the ration is spent for nothing.`,'bad'); }
+    for (const x of k){ if(x.ok){ x.c.hp=x.c.max; x.c.con=x.c.conMax; if(x.c.stable){ x.c.stable=false; log(`${x.c.name} wakes.`,'good'); } } else log(`${x.c.name}'s rest is broken: the ration is spent for nothing.`,'bad'); }
     const unfed = alive().filter(c=>!fed.has(c.name)); if (unfed.length) log(`No ration, no rest: ${unfed.map(c=>c.name).join(', ')}.`,'bad');
     tickConds(true, G.safe);
     log('The night passes.');
   } else { log('<span class="bad">No outdoor rest in this weather.</span>'); tickConds(false, false); }
-  // the dying
-  for (const c of G.party) if (c.hp<=0 && c.con>0 && !c.dead){ const p=G.loot.findIndex(x=>x.potion); if(p>=0){G.loot.splice(p,1); c.hp=c.max; log(`A potion brings ${c.name} back from the brink.`,'good');} else { const v=await die(`Death save for ${c.name} (18+ lives)`,'1d20'); if(v>=18){ c.hp=1; log(`${c.name} wakes, somehow.`,'good'); } else { c.con=0; log(`<b>${c.name} does not wake.</b>`,'bad'); } } }
+  await resolveDying();
   checkDeath(); if (G.over) return;
   await newDay();
 }
@@ -673,7 +742,7 @@ function closeModal(){ $('#modal').hidden=true; }
 // ---------- end ----------
 function checkDeath(){
   for (const c of G.party) if (c.con<=0 && !c.dead){ c.dead=true; c.hp=0; log(`<b>${c.name} the ${c.cls} is dead.</b>`,'bad'); }
-  if (!G.over && !alive().length && $('#modal').hidden!==false){ G.over=true; modal(`<h2>The wilds keep you</h2><p>The company is lost on day ${G.day}, ${dist(G.pos,G.goal)} hexes short of the City.</p>`,[['Again',newGame]]); }
+  if (!G.over && !alive().length && !dyingNow().length && $('#modal').hidden!==false){ G.over=true; modal(`<h2>The wilds keep you</h2><p>The company is lost on day ${G.day}, ${dist(G.pos,G.goal)} hexes short of the City.</p>`,[['Again',newGame]]); }
 }
 function win(){
   G.over=true; const score = G.gold + G.loot.reduce((a,b)=>a+b.gp,0) + G.xp*5 + alive().length*50 - G.day*5;
