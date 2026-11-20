@@ -1,23 +1,47 @@
+// Book page roller: adds a 🎲 button to every table whose rows start with a die result.
+// The die comes from the table's own header (2d6, d100, 1d20…); only when the header has none is it inferred.
 (function(){
-function parse(t){t=t.replace(/[–—]/g,'-').trim();var m=t.match(/^(\d+)\s*(?:-\s*(\d+)|(\+))?$/);if(!m)return null;var a=+m[1];if(m[1]==='00')a=100;var b=m[3]?999:m[2]!==undefined?(m[2]==='00'?100:+m[2]):a;return[a,b];}
-function r(n){return 1+Math.floor(Math.random()*n);}
-function dice(lo,hi,cap){var c=(cap.match(/(\d*)d(\d+)/)||[]);
- if(hi>20)return{n:'d100',f:function(){return r(100)}};
- if(lo>=2&&hi<=12&&lo<=3)return{n:'2d6',f:function(){return r(6)+r(6)}};
- if(lo>=3&&hi<=18&&lo<=4&&hi>12)return{n:'3d6',f:function(){return r(6)+r(6)+r(6)}};
- var s=[4,6,8,10,12,20].find(function(d){return d>=hi})||hi;return{n:'d'+s,f:function(){return r(s)}};}
-document.querySelectorAll('table').forEach(function(tb){
- var rows=[].slice.call(tb.querySelectorAll('tbody tr')).map(function(tr){var c=tr.querySelector('td.d');var p=c&&parse(c.textContent);return p?{tr:tr,p:p}:null}).filter(Boolean);
- if(rows.length<2)return;
- var lo=Math.min.apply(0,rows.map(x=>x.p[0])),hi=Math.max.apply(0,rows.map(x=>x.p[1]===999?x.p[0]:x.p[1]));
- var cap=tb.querySelector('caption');var d=dice(lo,hi,cap?cap.textContent:'');
- var btn=document.createElement('button');btn.className='rollbtn';btn.textContent='🎲 '+d.n;
- var out=document.createElement('span');out.className='rollout';
- btn.onclick=function(e){e.preventDefault();var v=d.f();rows.forEach(x=>x.tr.classList.remove('hit'));
-  var h=rows.find(x=>v>=x.p[0]&&v<=x.p[1]);if(h){h.tr.classList.add('hit');}out.textContent=' → '+v;};
- (cap||tb).insertBefore(out,(cap||tb).firstChild);(cap||tb).insertBefore(btn,out);
+function rng(t){ t=t.replace(/[–—]/g,'-').trim(); const m=t.match(/^(\d+)\s*(?:-\s*(\d+)|(\+))?$/); if(!m) return null;
+  const v=x=>x==='00'?100:+x; return [v(m[1]), m[3]?Infinity:(m[2]!==undefined?v(m[2]):v(m[1]))]; }
+// "3–4, 6–8, 10–11" → several ranges
+function ranges(t){ const out=t.split(',').map(rng); return out.every(Boolean)?out:null; }
+const r=n=>1+Math.floor(Math.random()*n);
+function parseDie(s){ const m=(s||'').match(/(\d*)d(\d+)/i); if(!m) return null; const n=+m[1]||1, f=+m[2];
+  return {n:`${n>1?n:''}d${f}`, roll:()=>{let t=0;for(let i=0;i<n;i++)t+=r(f);return t;}}; }
+function infer(lo,hi){
+  if (hi>20 && hi<=100) return parseDie('d100');
+  if (lo===3 && hi===18) return parseDie('3d6');
+  if (lo===2 && hi===12) return parseDie('2d6');
+  if (lo===4 && hi===24) return parseDie('4d6');
+  const s=[4,6,8,10,12,20].find(d=>d>=hi)||hi; return parseDie('d'+s);
+}
+document.querySelectorAll('table').forEach(tb=>{
+  // every td.d cell is a key; side-by-side tables carry two per row
+  const keys=[];
+  tb.querySelectorAll('tbody tr').forEach(tr=>tr.querySelectorAll('td.d').forEach(td=>{ const rs=ranges(td.textContent); if(rs) keys.push({tr,td,rs}); }));
+  if (keys.length<2) return;
+  const th = tb.querySelector('thead th.d') || tb.querySelector('thead th');
+  const cap = tb.querySelector('caption');
+  const headDie = th && /^\s*\d*d\d+\s*$/i.test(th.textContent) ? th.textContent.trim() : null;
+  const capDie = cap && (cap.querySelector('.die')||{}).textContent;
+  const all = keys.flatMap(k=>k.rs); const lo=Math.min(...all.map(x=>x[0])), hi=Math.max(...all.map(x=>x[1]===Infinity?x[0]:x[1]));
+  const d = parseDie(headDie) || (capDie && /^\s*\d*d\d+\s*(\+|$)/.test(capDie) && parseDie(capDie)) || infer(lo,hi);
+  const bonus = capDie && /\+\s*bonus/.test(capDie);
+  const btn=document.createElement('button'); btn.className='rollbtn'; btn.textContent='🎲 '+d.n+(bonus?'+bonus':'');
+  const out=document.createElement('span'); out.className='rollout';
+  btn.onclick=e=>{ e.preventDefault(); let v=d.roll(); let note='';
+    if (bonus){ const b=+(prompt('Bonus to add?','0')||0); v+=b; note=` (${v-b}${b>=0?'+':''}${b})`; }
+    tb.querySelectorAll('.hit').forEach(x=>x.classList.remove('hit'));
+    // clamp to the table's ends: below the lowest row reads the lowest, above the highest reads the highest
+    const vv=Math.max(lo,Math.min(v, Math.max(...all.map(x=>x[1]))));
+    const k=keys.find(k=>k.rs.some(([a,b])=>vv>=a&&vv<=b));
+    if (k){ k.td.classList.add('hit'); let n=k.td.nextElementSibling; while(n && !n.classList.contains('d')){ n.classList.add('hit'); n=n.nextElementSibling; } }
+    out.textContent=' → '+v+note+(k?'':' (no row)');
+  };
+  const host=cap||tb; host.insertBefore(out,host.firstChild); host.insertBefore(btn,out);
 });
-var tray=document.createElement('div');tray.id='tray';
-[4,6,8,10,12,20,100].forEach(function(s){var b=document.createElement('button');b.textContent='d'+s;b.onclick=function(){res.textContent='d'+s+': '+r(s)};tray.appendChild(b)});
-var res=document.createElement('b');tray.appendChild(res);document.body.appendChild(tray);
+const tray=document.createElement('div'); tray.id='tray';
+const res=document.createElement('b');
+[4,6,8,10,12,20,100].forEach(s=>{ const b=document.createElement('button'); b.textContent='d'+s; b.onclick=()=>res.textContent='d'+s+': '+r(s); tray.appendChild(b); });
+tray.appendChild(res); document.body.appendChild(tray);
 })();
