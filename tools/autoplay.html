@@ -6,7 +6,7 @@ const d=f.contentDocument;const step=()=>{n++;
  const m=d.getElementById('modal');
  if(!m.hidden){const b=[...d.querySelectorAll('#mbox button')];const pref=b.find(x=>/Roll a random|Leave|Fight|New journey|Continue/.test(x.textContent)&&Math.random()<.7)||b[Math.floor(Math.random()*b.length)];if(n<4){const r=b.find(x=>/Ration/.test(x.textContent));r&&r.click();r&&r.click();} pref&&pref.click();}
  else if(d.querySelector('#actions button.roll')){d.querySelector('#actions button.roll').click()}else{const h=[...d.querySelectorAll('.hex.reach')];const camp=d.querySelector('#actions button.main');
-  if(Math.random()<.25||!h.length)camp&&camp.click();else{const x=h[Math.floor(Math.random()*h.length)];x.dispatchEvent(new MouseEvent('click'))}}
+  const ab=[...d.querySelectorAll('#actions button:not(:disabled)')];if(Math.random()<.15&&ab.length)ab[Math.floor(Math.random()*ab.length)].click();else if(Math.random()<.2||!h.length)camp&&camp.click();else{const x=h[Math.floor(Math.random()*h.length)];x.dispatchEvent(new MouseEvent('click'))}}
  if(n<3000)setTimeout(step,5);else document.getElementById('out').textContent='ERRS:'+JSON.stringify(errs.concat(f.contentWindow.__errs||[]).concat(f.contentWindow.__cm||[]))+'BTNS:'+[...d.querySelectorAll('#mbox button')].map(b=>b.textContent).join('/')+' HIDDEN:'+d.getElementById('modal').hidden+' ACT:'+d.getElementById('actions').innerText+' N:'+n+' G:'+JSON.stringify({...f.contentWindow.__G(),hexes:0,road:0})+'\n'+d.getElementById('hud').innerText+'\n'+d.getElementById('log').innerText.slice(-3000)};setTimeout(step,300)};
 </script>
 <script>

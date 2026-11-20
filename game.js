@@ -120,7 +120,7 @@ function name(){
   return pick(f, r(100))[0] + ' ' + (p?p[0]:'').replace(/-$/,'') + (s?s[0]:'').replace(/^-/,'');
 }
 function newGame(){ window.__G=()=>G;
-  G = {foragedBy:{}, day:1, season:r(4)-1, prev:null, conds:[], gear:{fishing:false}, gold:0, rations:0, torches:0, mounts:0, loot:[], xp:0, clues:0,
+  G = {riverIn:{}, foragedBy:{}, day:1, season:r(4)-1, prev:null, conds:[], gear:{fishing:false}, gold:0, rations:0, torches:0, mounts:0, loot:[], xp:0, clues:0,
        hexes:{}, pos:{q:0,r:0}, goal:{q:14,r:-3+r(5)}, mc:0, weather:null, wdays:0, buffs:{}, factions:{},
        party:[],
        over:false};
@@ -137,15 +137,60 @@ function newGame(){ window.__G=()=>G;
   chooseParty();
 }
 const hexAt = p => G.hexes[key(p.q,p.r)];
+// A hex exists from the moment something points at it; its terrain is rolled when the company first reaches it.
 function makeHex(p, force){
-  let terr = force;
-  if (!terr){
-    const nb = nbrs(p).map(hexAt).filter(Boolean).filter(h=>h.terr!=='Sea / Lake');
-    if (nb.length && Math.random()<.55) terr = nb[r(nb.length)-1].terr;
-    else { const v=r(100); terr = pick(T('Terrain'),v)[0]; }
-    if (G.road.has(key(p.q,p.r)) && terr==='Sea / Lake') terr='Grasslands';
+  return G.hexes[key(p.q,p.r)] = {q:p.q, r:p.r, terr:force||null, road:G.road.has(key(p.q,p.r)), seen:false, fog:false, extra:[]};
+}
+async function generate(h){
+  if (h.terr) return;
+  const v = await die('Terrain (§3)', '1d100'); let t = pick(T('Terrain'), v)[0];
+  if (t==='Sea / Lake' && h.road){ log('Water — but the road runs here, so it skirts the shore: Grasslands.'); t='Grasslands'; }
+  h.terr = t; log(`Terrain: <b>${t}</b>.`);
+  await rivers(h);
+}
+// ---------- rivers (§3.2) ----------
+const opp = i => (i+3)%6;
+const edgeKey = (h,i) => { const n=nbrs(h)[i]; return key(n.q,n.r); };
+async function riverExit(h, avoid){
+  for (let tries=0; tries<12; tries++){
+    const e = (await die('River: exit edge (1 east, then counter-clockwise)','1d6'))-1;
+    if (avoid.includes(e)){ log('That is where it came from: reroll.'); continue; }
+    const t = hexAt(nbrs(h)[e]);
+    if (t && t.terr && t.terr!=='Sea / Lake' && !t.river){ log('That edge leads into a known hex with no river: reroll.'); continue; }
+    return e;
   }
-  return G.hexes[key(p.q,p.r)] = {q:p.q, r:p.r, terr, road:G.road.has(key(p.q,p.r)), seen:false, fog:false};
+  return null;
+}
+async function rivers(h){
+  const k = key(h.q,h.r); const inflow = G.riverIn[k];
+  if (inflow){
+    if (h.terr==='Sea / Lake'){ log('The river empties into the water here.'); return; }
+    let lake = false;
+    if (inflow.len>=4){ const v = await die(`Lake check (river ${inflow.len} hexes long: lake on ${inflow.len>=7?'1–2':'1'})`,'1d6'); lake = v <= (inflow.len>=7?2:1); }
+    if (lake){ log('The river pools into a <b>lake</b>: this hex is water.','bad'); h.terr='Sea / Lake'; return; }
+    const ins = inflow.from;
+    const e = await riverExit(h, ins);
+    h.river = {ins, out:e}; log(`A river runs through, ${inflow.len+1} hexes from its source.`);
+    if (e!==null) flowInto(h, e, inflow.len+1);
+    return;
+  }
+  if (h.terr==='Sea / Lake') return;
+  const pct = (T('River source').rows.flatMap(r=>[[r[0],r[1]],[r[2],r[3]]]).find(x=>x[0]===h.terr)||[0,'0%'])[1];
+  const v = await die(`River source: a river rises on ${pct} (d100 under)`, '1d100');
+  if (v <= parseInt(pct)){ const e = await riverExit(h, []); h.river = {ins:[], out:e}; log('<b>A river rises here.</b>'); if (e!==null) flowInto(h, e, 1); }
+}
+function flowInto(h, e, len){
+  const k = edgeKey(h,e); const t = hexAt(nbrs(h)[e]);
+  if (t && t.terr==='Sea / Lake'){ log('It runs into the water next door.'); return; }
+  if (t && t.river){ t.river.ins.push(opp(e)); log('It joins the river next door.'); return; }
+  const cur = G.riverIn[k]; G.riverIn[k] = {len:Math.max(len, cur?cur.len:0), from:(cur?cur.from:[]).concat([opp(e)])};
+}
+// moving between two hexes that the same river links
+function alongRiver(from, to){
+  const i = nbrs(from).findIndex(n=>n.q===to.q&&n.r===to.r); if (i<0) return false;
+  if (from.river && (from.river.out===i || from.river.ins.includes(i))) return true;
+  if (to.river && (to.river.out===opp(i) || to.river.ins.includes(opp(i)))) return true;
+  return false;
 }
 
 // ---------- log ----------
@@ -174,10 +219,12 @@ function render(){
   let roads='';
   for (const [k,h] of cells){
     const c = px(h); const unseen = !h.seen;
-    s += `<polygon class="hex ${unseen?'fog':''} ${reach.has(k)?'reach':''}" data-k="${k}" points="${corners(c)}" fill="${unseen?'':TERR[h.terr].c}"><title>${unseen?'Unexplored':h.terr+(h.feature?' · '+(h.fname||h.feature):'')}</title></polygon>`;
+    s += `<polygon class="hex ${unseen?'fog':''} ${reach.has(k)?'reach':''}" data-k="${k}" points="${corners(c)}" fill="${unseen?'':(TERR[h.terr]||TERR.Grasslands).c}"><title>${unseen?'Unexplored':h.terr+(h.river?' · river':'')+(h.feature?' · '+(h.fname||h.feature):'')}</title></polygon>`;
     if (h.seen){
       const ic = h.feature==='Settlement'?'🏰':h.feature&&!/Empty/.test(h.feature)?'✦':TERR[h.terr].ic;
       if (ic) s+=`<text class="icon" x="${c.x}" y="${c.y}">${ic}</text>`;
+      if (h.river){ for (const i of [h.river.out, ...h.river.ins]) if (i!==null && i!==undefined){ const n=nbrs(h)[i], d=px(n); roads+=`<line class="river" x1="${c.x}" y1="${c.y}" x2="${(c.x+d.x)/2}" y2="${(c.y+d.y)/2}"/>`; } }
+      if (h.muddy||h.hard||h.short) s+=`<text class="tag" x="${c.x}" y="${c.y+S*.55}">${h.muddy?'mud':h.hard?'hard':'shortcut'}</text>`;
       if (h.road) for (const n of nbrs(h)){ const o=G.hexes[key(n.q,n.r)]; if(o&&o.seen&&o.road){const d=px(o); roads+=`<line class="road" x1="${c.x}" y1="${c.y}" x2="${(c.x+d.x)/2}" y2="${(c.y+d.y)/2}"/>`;} }
     } else if (h.known) s+=`<text class="icon" x="${c.x}" y="${c.y}">🏰</text>`;
   }
@@ -204,7 +251,9 @@ function render(){
   btn('Hunt', ()=>forage('hunt'), '', done0||row0[2]==='—');
   btn(G.gear.fishing?'Fish':'Fish (needs gear)', ()=>forage('fish'), '', done0||!G.gear.fishing||!(waterNear(h0)));
   if (here.feature==='Settlement') btn('Visit '+(here.fname||'settlement'), ()=>shop(false));
-  if (here.feature && here.feature!=='Settlement' && !here.done && !/Empty/.test(here.feature)) btn('Explore the '+here.feature.split(/[.;(]/)[0]+' (optional)', ()=>exploreFeature(here));
+  if (here.feature && here.feature!=='Settlement' && !here.done && !/Empty|Deep Chasm/.test(here.feature)) btn('Explore the '+here.feature.split(/[.;(]/)[0]+' (optional)', ()=>exploreFeature(here,-1));
+  (here.extra||[]).forEach((x,i)=>{ if(!(here.extraDone||[])[i]) btn('Explore the '+x.split(/[.;(]/)[0]+' (optional)', ()=>exploreFeature(here,i)); });
+  if (!here.explored && here.terr!=='Sea / Lake') btn('Explore the land (whole day)', ()=>exploreLand(here), '', G.mc>0);
   $('#legend').textContent = 'Click a highlighted neighbouring hex to move.';
 }
 const mounted = () => G.mounts >= alive().length && alive().length>0;
@@ -297,7 +346,7 @@ const WX = {
   'Wildfire':      async()=>{ await saveOrDamage('CON','1d4'); B({noforage:1}); },
   'Lightning storm':async()=>{ await saveOrDamage('DEX','1d6'); if(G.mounts){ const k=await checks('WIS to hold the mounts',[alive()[0]],SAVE.WIS,12); if(!k[0].ok){ G.mounts--; log('A mount bolts and is gone.','bad'); } } },
   'Heat wave':     async()=>{ await saveOrDamage('CON','1'); B({checks:-1, forageDC:3}); },
-  'Flash flood':   async()=>{ B({mc:1}); await spoil('1d4'); },
+  'Flash flood':   async()=>{ B({mc:1, flood:1}); await spoil('1d4'); },
   'Windstorm':     async()=>{ B({mc:1, nav:3, nofire:1}); },
   'Thunderstorm':  async()=>{ B({nav:3, nofire:1, norest:1}); },
   'Hailstorm':     async()=>{ await saveOrDamage('DEX','1'); B({nohunt:1}); },
@@ -340,9 +389,12 @@ let busy=false;
 async function move(k){ if(busy||G.wait) return; busy=true; try { await move_(k); } catch(e){ console.error(e); (window.__errs=window.__errs||[]).push(e.stack); } busy=false; render(); }
 // MC to enter a hex (§2): terrain cost, a road on the edge used replaces it with 1; stormy makes everything 2.
 function costInto(from, to){
-  if (G.weather && (G.weather.band==='Stormy')) return 2;
-  if (from.road && to.road) return 1;
-  return TERR[to.terr].mc + (to.hard?1:0) - (to.short && TERR[to.terr].mc>1 ? 1 : 0);
+  if (G.weather && (G.weather.band==='Stormy')) return 2;          // stormy: every hex 2, roads included
+  if (from.road && to.road) return 1;                               // road on the edge used replaces the terrain cost
+  if (to.river && !alongRiver(from,to) && !to.road) return 2;       // river crossing, no bridge
+  if (to.short) return 1;                                           // shortcut: counts as normal
+  if (to.muddy || to.hard) return 2;                                // muddy / hard to navigate: difficult
+  return TERR[to.terr].mc;
 }
 async function move_(k){
   if (G.over) return;
@@ -356,7 +408,8 @@ async function move_(k){
   if (!known && left < 1){ log('The day is spent. Make camp.'); return; }
   if (from.chasm && from.chasm.includes(k)){ log('The chasm blocks that edge. Go around.','bad'); return; }
   // navigation (§2.1): only into open, unknown country; a road on the way is no check
-  if (!known && !(from.road && G.road.has(k))){
+  const toP = {q,r:rr};
+  if (!known && !(from.road && G.road.has(k)) && !alongRiver(from,toP)){
     const dc = 12 + (G.weather.band==='Stormy'?3:0) + (G.buffs.nav||0) + (from.hard?3:0);
     const nav = best(c=>c.int+condMod(c,'checks'))+(G.favour?1:0);
     const v = await die(`Navigation · INT check DC ${dc} (best INT in the company)`, '1d20', nav);
@@ -366,18 +419,24 @@ async function move_(k){
       const e = await die('Drift: which edge (1 east, then counter-clockwise)', '1d6'); dest = nbrs(G.pos)[e-1]; k=key(dest.q,dest.r);
       if (G.weather.band==='Stormy') { log(T('Navigation').rows[3][2],'bad'); G.stormDrift=true; }
     }
-  } else if (!known) log('The road leads the way: no navigation check.');
+  } else if (!known) log(alongRiver(from,toP)?'You follow the river: no navigation check.':'The road leads the way: no navigation check.');
   return enterHex(dest, from);
 }
 // Everything that puts the company in a hex goes through here: cost, reveal, feature, event, win.
 async function enterHex(dest, from, free){
   const h = hexAt(dest) || makeHex(dest);
+  await generate(h);
   const wasSeen = h.seen; h.seen = true;
   if (h.terr==='Sea / Lake'){ log(`${TERR['Sea / Lake'].ic} Open water blocks the way. You stay where you are.`); render(); return; }
   if (!free){
     const c = costInto(from, h), left = budget()-G.mc;
     if (c > left){ log(`You reach the edge of the ${h.terr.toLowerCase()} (${c} MC) with only ${left} MC left. You stop short and must camp.`); G.mc = budget(); render(); return; }
     G.mc += c;
+    if (h.river && !alongRiver(from,h) && !h.road){
+      log('You ford the river (no bridge).');
+      if (G.buffs.crossing || G.buffs.flood){ const f = await die('The river is in flood: 1–2 it sweeps someone away','1d6');
+        if (f<=2) for (const k of await checks('STR or DEX to keep your feet', alive(), c=>Math.max(SAVE.STR(c),SAVE.DEX(c)), 12)) if(!k.ok){ log(`${k.c.name} is swept downstream and loses a torch.`,'bad'); if(G.torches) G.torches--; hurt(k.c, await die('Battered by the flood','1d4')); } }
+    }
   }
   if (G.stormDrift){ G.stormDrift=false; G.mc = budget(); }
   G.prev = {...G.pos}; G.pos = {q:h.q, r:h.r};
@@ -392,7 +451,16 @@ async function enterHex(dest, from, free){
 // ---------- feature (§4) ----------
 async function feature(h){
   if (h.feature) return;
-  const v = await die('Special feature', '2d6'); const row = pick(T('Special feature'), v); let txt = h.road?row[0]:row[1];
+  const f = await rollFeature(h, false);
+  h.feature = f;
+  render();
+}
+// one roll on Special feature (§4). Shrine and Portal may call for another feature; a second Portal or Shrine is rerolled.
+async function rollFeature(h, isExtra){
+  for (;;){
+  const v = await die(isExtra?'Another special feature':'Special feature', '2d6'); const row = pick(T('Special feature'), v); let txt = h.road?row[0]:row[1];
+  if (/^Portal\. Reroll/.test(txt) && G.hasPortal){ log('Portal — but one already exists: reroll.'); continue; }
+  if (/^Shrine\. Reroll/.test(txt) && G.hasShrine){ log('Shrine — but one already exists: reroll.'); continue; }
   if (/^1–3 Dungeon/.test(txt)) txt = (await die('Dungeon or Catacombs (1–3 / 4–6)','1d6'))<=3?'Dungeon':'Catacombs';
   if (/^1–3 Catacombs/.test(txt)) txt = (await die('Catacombs or Cavern (1–3 / 4–6)','1d6'))<=3?'Catacombs':'Cavern';
   let f = txt.split(/[.—]/)[0].trim();
@@ -400,18 +468,27 @@ async function feature(h){
   if (/Settlement/.test(txt)){ const b=await die('Settlement band: 1–3 Village, 4–5 Town, 6 City','1d6'); h.band=b<=3?'Village':b<=5?'Town':'City'; f='Settlement'; h.fname = name().split(' ')[1]+(h.band==='City'?' City':h.band==='Town'?'ton':'by'); }
   if (/^Village/.test(f)){ f='Settlement'; h.band='Village'; h.fname=name().split(' ')[1]+'by'; }
   if (/Trading Post|Tavern/.test(f)){ h.band='Post'; h.fname=f; f='Settlement'; }
-  if (/Deep Chasm/.test(f)){ const e=await die('Chasm: which edge it runs along','1d6'); const n=nbrs(h); h.chasm=[n[e-1],n[e%6]].map(x=>key(x.q,x.r)); h.done=true; }
-  h.feature=f;
-  if (f!=='Empty landscape' && f!=='Settlement' && !h.done) log('<i>Exploring it is optional: use the button, or move on.</i>');
-  log(f==='Empty landscape'?'No feature: empty landscape.':`<b>${h.fname?h.band+': '+h.fname:f}.</b> ${(T('What each feature is').rows.find(x=>f.startsWith(x[0]))||['',''])[1]}`);
-  render();
+  if (/Deep Chasm/.test(f)){ const e=await die('Chasm: which edge it runs along','1d6'); const n=nbrs(h); h.chasm=[n[e-1],n[e%6]].map(x=>key(x.q,x.r)); }
+  if (/^Keep\. Odd/.test(txt)){ const o=await die('Keep: odd on the road, even off it','1d6'); log(o%2?'It stands on the road.':'It stands off the road.'); }
+  if (/Portal/.test(f)) G.hasPortal=true;
+  if (/Shrine/.test(f)) G.hasShrine=true;
+  log(f==='Empty landscape'?'No feature: empty landscape.':`<b>${f==='Settlement'?h.band+': '+h.fname:f}.</b> ${(T('What each feature is').rows.find(x=>f.startsWith(x[0]))||['',''])[1]}`);
+  const also = txt.match(/On (\d)–(\d) also roll another feature/);
+  if (also && !isExtra){ const a=await die(`Another feature too? (${also[1]}–${also[2]} yes)`,'1d6');
+    if (a<=+also[2]){ const g = await rollFeature(h, true);
+      if (g==='Settlement'){ h.extra.push(f); log(`<i>The ${f} stands by the settlement.</i>`); return 'Settlement'; }
+      if (g!=='Empty landscape' && g!=='Deep Chasm') h.extra.push(g); } }
+  if (f!=='Empty landscape' && f!=='Settlement' && !h.done && !isExtra) log('<i>Exploring it is optional: use the button, or move on.</i>');
+  return f;
+  }
 }
-async function exploreFeature(h){
+async function exploreFeature(h, which){
   if(busy||G.wait) return; busy=true;
   try {
-  h.done = true; const f = h.feature;
+  let f;
+  if (which===undefined || which<0){ h.done = true; f = h.feature; } else { h.extraDone = h.extraDone||[]; h.extraDone[which]=true; f = h.extra[which]; }
   if (/Shrine/.test(f) && !h.shrined){ h.shrined=1; const v=await die('Shrine','1d6'), row=pick(T('Shrine'),v); log(`<b>${row[0]}.</b> ${row[1]}`,'good'); if(/attack/.test(row[1]))G.buffs.atk=1; if(/AC/.test(row[1]))alive().forEach(c=>c.acB=1); }
-  else if (/Portal/.test(f)){ log('The portal hums. You step through…'); const a=await die('Portal: shift east–west','1d5'), b=await die('Portal: shift north–south','1d5'); const d={q:G.pos.q+a-3,r:G.pos.r+b-3}; const hh=hexAt(d)||makeHex(d); if(hh.terr==='Sea / Lake')hh.terr='Grasslands'; log(`…and come out ${dist(d,G.goal)} hexes from the City.`); await enterHex(d, hexAt(G.pos), true); }
+  else if (/Portal/.test(f)){ log('The portal hums. You step through…'); const a=await die('Portal: shift east–west','1d5'), b=await die('Portal: shift north–south','1d5'); const d={q:G.pos.q+a-3,r:G.pos.r+b-3}; const hh=hexAt(d)||makeHex(d); await generate(hh); if(hh.terr==='Sea / Lake'){ hh.terr='Grasslands'; log('(It opens on a shore: Grasslands.)'); } log(`…and come out ${dist(d,G.goal)} hexes from the City.`); await enterHex(d, hexAt(G.pos), true); }
   if (/Shrine|Monastery/.test(f) && G.conds.some(x=>x.ends==='blessed')){ G.conds=G.conds.filter(x=>x.ends!=='blessed'); log('Blessed: the unholy taint lifts.','good'); }
   if (/Shrine|Portal/.test(f)) {}
   else if (/Monastery|Keep/.test(f)){ log(`The ${f} gives you shelter. A safe night here; you may rest.`,'good'); G.safe=true; }
@@ -434,6 +511,43 @@ function gainLoot(txt){
   if (/(\d+) (gp|sp|cp) (in|on)/.test(txt)){ G.gold+=gp; log(`${txt} → <b>+${gp} gp</b>`,'good'); }
   else { G.loot.push({txt,gp}); log(`Found: <b>${txt}</b>`,'good'); }
   G.xp += gp>=50?3:gp>=10?1:0; levelUp();
+}
+
+// ---------- terrain hazards (§10.3) ----------
+// 2d6: first die picks the column (1–2 Movement, 3–4 Damage, 5–6 Weaken), second the row; doubles = all three.
+// Severity: minor (party level 0–2), normal (3–6), major (7+) unless the sending entry names it.
+// The book gives no numbers; these are this game's: Movement +1/+2 MC and 0/1/2 torches (major ends the day);
+// Damage DEX DC 12 or 1d4/1d6/2d6; Weaken CON DC 12 or −1/−2/−3 to checks until rest, and Navigation DC +3 today.
+const HZ = {Grasslands:'Grasslands',Forest:'Forest',Hills:'Hills and Mountains',Mountains:'Hills and Mountains',Swamp:'Swamp',Jungle:'Jungle',Desert:'Desert',Glacier:'Glacier','Sea / Lake':'Sea / Lake'};
+async function terrainHazard(h, sev){
+  sev = sev || (avgLv()>=7?'major':avgLv()>=3?'normal':'minor');
+  const t = T('Hazards — '+HZ[h.terr]);
+  const a = await die(`Terrain hazard · ${h.terr} · column (1–2 Movement, 3–4 Damage, 5–6 Weaken)`,'1d6');
+  const b = await die('Terrain hazard · row','1d6');
+  const row = t.rows.find(x=>+x[0]===b); const cols = a===b ? [1,2,3] : [Math.ceil(a/2)];
+  log(`<b>${cols.map(c=>row[c]).join(' + ')}</b> (${sev}${a===b?', doubles: all three at once':''}). Hazards cannot be avoided.`,'bad');
+  const lvl = {minor:0, normal:1, major:2}[sev];
+  if (cols.includes(1)){ if (lvl===2){ G.mc=budget(); log('The way is lost for today.','bad'); } else { G.mc+=lvl+1; log(`+${lvl+1} MC.`,'bad'); } const tor=Math.min(G.torches,lvl); if(tor){ G.torches-=tor; log(`${tor} torch(es) burned getting through.`,'bad'); } }
+  if (cols.includes(2)) for (const k of await checks('DEX vs the hazard', alive(), SAVE.DEX, 12)) if(!k.ok) hurt(k.c, await die(`Hazard damage to ${k.c.name}`, ['1d4','1d6','2d6'][lvl]));
+  if (cols.includes(3)){ for (const k of await checks('CON vs the hazard', alive(), SAVE.CON, 12)) if(!k.ok) addCond({who:k.c.name,kind:'checks',val:-(lvl+1),ends:'rest',label:`${k.c.name}: ${row[3].toLowerCase()}, −${lvl+1} to checks until rest`}); G.buffs.nav=(G.buffs.nav||0)+3; log('The hazard has taken the landmarks: Navigation DC +3 today.'); }
+}
+const POI = {Grasslands:'Grasslands',Forest:'Forest',Hills:'Hills and Mountains',Mountains:'Hills and Mountains',Swamp:'Swamp',Jungle:'Jungle',Desert:'Desert',Glacier:'Glacier'};
+async function exploreLand(h){
+  if(busy||G.wait) return; busy=true;
+  try {
+    h.explored = true; G.mc = budget(); log('You spend the day exploring the land (§7: the whole day).');
+    const t = T('Points of interest — '+POI[h.terr]);
+    const a = await die('Point of interest · Location','1d20'), b = await die('Point of interest · Development','1d20');
+    const loc = pick(t,a)[0], dev = pick(t,b)[1];
+    log(`<b>${loc.replace(' *','')}</b> — ${dev}`);
+    if (/\*/.test(loc) && h.feature!=='Settlement'){
+      const band = /city/i.test(loc)?'City':/town/i.test(loc)?'Town':'Village';
+      if (h.feature && h.feature!=='Empty landscape') h.extra.push(h.feature);
+      h.feature='Settlement'; h.band=band; h.fname=name().split(' ')[1]+(band==='City'?' City':band==='Town'?'ton':'by'); log(`A settlement: <b>${band}: ${h.fname}</b>.`,'good');
+    }
+    const hz = dev.match(/Roll for a (minor|normal|major) hazard/); if (hz) await terrainHazard(h, hz[1]);
+    await resolveDying();
+  } finally { busy=false; render(); }
 }
 
 // ---------- hex events (§5) ----------
@@ -489,8 +603,17 @@ async function lost(){
   const e=await die('Which edge','1d6'); const n=nbrs(G.pos)[e-1];
   await enterHex(n, hexAt(G.pos), true);
 }
-async function hazard(h){
-  const v=await die('Wilderness hazard','2d6'), row=pick(T('Wilderness'),v); log(`<b>${row[0]}.</b> ${row[1]}`);
+// the MC already paid to enter h, re-priced after a terrain mark changes it
+function repay(h, before){ const after = costInto(hexAt(G.prev)||h, h); if (after!==before){ G.mc += after-before; log(`The crossing now costs ${after} MC instead of ${before} (${after>before?'+':''}${after-before}).`); } }
+async function hazard(h, not=[]){
+  let v, row;
+  for (;;){ v=await die('Wilderness hazard','2d6'); row=pick(T('Wilderness'),v); if (!not.includes(v)) break; log(`<i>${row[0]} — not this one again: reroll.</i>`); }
+  log(`<b>${row[0]}.</b> ${row[1]}`);
+  const before = costInto(hexAt(G.prev)||h, h);
+  if (v===4){ h.hard=true; repay(h,before); return hazard(h, [...not,4,10]); }
+  if (v===10){ h.short=true; h.hard=false; h.muddy=false; repay(h,before); return hazard(h, [...not,10,4]); }
+  if (v===7){ h.muddy=true; repay(h,before); return; }
+  if (v===6){ G.mc++; log('Detour: +1 MC.'); return hazard(h, [...not,6]); }
   if (v===3) return trouble();
   if (v===2) return encounter('WEIRD',h);
   if (v===12){ let choice; await modal(`<h2>Toll taker</h2><p>${row[1]}</p>`, [['Pay 10 gp',()=>choice='pay'],['Fight',()=>choice='fight'],['Slip past (DEX)',()=>choice='slip']]);
@@ -499,8 +622,10 @@ async function hazard(h){
     return encounter('MINIONS',h); }
   if (v===8){ const c=await whoRandom(); const k=await checks('DEX vs trap',[c],SAVE.DEX,12); if(!k[0].ok) hurt(c, await die('Trap damage','1d6')); }
   if (v===9){ const c=await whoRandom(); const k=await checks('STR out of the quicksand',[c],SAVE.STR,12); if(!k[0].ok){ const n=Math.min(G.rations, await die('Rations lost','1d4')); G.rations-=n; log(`${c.name} struggles free; ${n} rations lost.`,'bad'); } }
-  if (v===6||v===4||v===7) G.mc++;
-  if (v===10) G.mc=Math.max(0,G.mc-1);
+  if (v===11){ let c; await modal(`<h2>Flood</h2><p>${row[1]}</p>`,[['Wait it out (camp here)',()=>c='wait'],['Detour (+1 MC)',()=>c='detour'],['Cross: STR check',()=>c='cross']]);
+    if (c==='wait'){ G.mc=budget(); log('You wait for the water to fall.'); }
+    else if (c==='detour'){ G.mc++; log('+1 MC.'); }
+    else for (const k of await checks('STR to cross the flood', alive(), SAVE.STR, 12)) if(!k.ok) hurt(k.c, await die(`${k.c.name} battered by the water`,'1d4')); }
 }
 async function npc(){
   const v=await die('NPC encounter','1d20'), row=pick(T('NPC encounter'),v);
@@ -620,13 +745,13 @@ function levelUp(){
 
 // ---------- forage (§8.2) & camp (§8) ----------
 // §8.2: once a day per character, INT vs the terrain's DC. Forage/fish success = 1 ration; hunt = What the hunt brings.
-function waterNear(h){ return nbrs(h).some(n=>{const o=hexAt(n); return o&&o.seen&&o.terr==='Sea / Lake';}); }
+function waterNear(h){ return !!h.river || nbrs(h).some(n=>{const o=hexAt(n); return o&&o.seen&&o.terr==='Sea / Lake';}); }
 async function forage(kind){
   if(busy||G.wait) return; busy=true;
   try {
   const h = hexAt(G.pos); const tb = T('Forage, hunt or fish');
   const col = {forage:1, hunt:2, fish:3}[kind];
-  const row = (kind==='fish' && waterNear(h)) || (h.road && false) ? tb.rows.find(x=>/River or coast/.test(x[0])) : (tb.rows.find(x=>x[0]===h.terr) || tb.rows[0]);
+  const row = (kind==='fish' && waterNear(h)) || (h.river && kind!=='fish') ? tb.rows.find(x=>/River or coast/.test(x[0])) : (tb.rows.find(x=>x[0]===h.terr) || tb.rows[0]);
   let dc = row[col]==='—' || !row[col] ? null : +row[col];
   if (dc===null){ log(`No ${kind==='fish'?'fishing':kind==='hunt'?'hunting':'foraging'} here (— on the table).`); return; }
   if (G.weather.harsh) dc = 18;
@@ -751,7 +876,7 @@ function win(){
 }
 window.addEventListener('resize', ()=>G&&render());
 // ---------- save / resume (this browser only) ----------
-const SKEY='ohx-save-v1';
+const SKEY='ohx-save-v2';
 function save(){ if(!G || G.wait || busy || !G.party.length || !$('#modal').hidden) return;
   try { const logs=[...document.querySelectorAll('#log p')].slice(-300).map(p=>[p.className,p.innerHTML]);
     localStorage.setItem(SKEY, JSON.stringify({v:1, G:{...G, road:[...G.road], wait:null}, logs})); } catch(e){} }
@@ -759,7 +884,7 @@ function load(){ try { const d=JSON.parse(localStorage.getItem(SKEY)||'null'); i
 const saved = load();
 if (saved){
   G = {...saved.G, road:new Set(saved.G.road), wait:null};
-  G.conds=G.conds||[]; G.foragedBy=G.foragedBy||{}; G.gear=G.gear||{fishing:false};
+  G.conds=G.conds||[]; G.foragedBy=G.foragedBy||{}; G.riverIn=G.riverIn||{}; Object.values(G.hexes).forEach(h=>h.extra=h.extra||[]); G.gear=G.gear||{fishing:false};
   window.__G=()=>G;
   for (const [c,h] of saved.logs){ const p=document.createElement('p'); p.className=c; p.innerHTML=h; $('#log').appendChild(p); }
   $('#log').scrollTop=1e9;

@@ -43,3 +43,5 @@ button.main{background:var(--acc);color:#fff;border-color:var(--acc)}
 @media(prefers-color-scheme:dark){#log p.pending{background:#4a3a1c}}
 #log .ask{font:600 13px Cond;text-transform:uppercase;letter-spacing:.04em}
 button.roll{font-size:17px;padding:10px 16px;width:100%}
+.river{stroke:#3f7fc0;stroke-width:4;stroke-linecap:round;pointer-events:none}
+.tag{font:10px Cond;fill:#3b2b1a;text-anchor:middle;pointer-events:none}
