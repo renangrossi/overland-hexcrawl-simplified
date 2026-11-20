@@ -185,6 +185,8 @@ function render(){
   const acts = $('#actions'); acts.innerHTML='';
   const btn = (t,f,cls,dis) => { const b=document.createElement('button'); b.textContent=t; b.onclick=f; if(cls)b.className=cls; b.disabled=!!dis; acts.appendChild(b); };
   if (G.over){ btn('New journey', newGame, 'main'); return; }
+  if (G.wait){ btn(G.wait.label, G.wait.go, 'main roll'); $('#legend').textContent='Read the log, then roll.'; return; }
+  if (busy){ $('#legend').textContent=''; return; }
   btn('Make camp (end day)', camp, 'main');
   btn('Forage / hunt', forage, '', G.foraged);
   if (here.feature==='Settlement') btn('Visit '+(here.fname||'settlement'), ()=>shop(false));
@@ -194,40 +196,68 @@ function render(){
 const mounted = () => G.mounts >= alive().length && alive().length>0;
 const budget = () => mounted()?6:4;
 
+// ---------- explicit rolls: every die waits for the player's click ----------
+// die(label, expr, mod) logs what is about to be rolled, shows a 🎲 button, and resolves with the total.
+function die(label, expr, mod=0, note=''){
+  return new Promise(res=>{
+    const gate = expr==='—';
+    log(`<span class="ask">${label}</span>${gate?'':` — roll <b>${expr}${mod?(mod>0?'+':'')+mod:''}</b>`}${note?' · '+note:''}`, 'pending');
+    G.wait = {label:`🎲 ${gate?'Roll':'Roll '+expr+(mod?(mod>0?' +':' ')+mod:'')} — ${label}`, go:()=>{
+      const v = gate?0:roll(expr)+mod; G.wait=null;
+      const p=[...document.querySelectorAll('#log p.pending')].pop(); if(p){ p.classList.remove('pending'); if(!gate) p.innerHTML += ` → <span class="roll">${v}</span>`; }
+      res(v);
+    }};
+    render();
+  });
+}
+// one click rolls a d20 check for each listed character
+async function checks(label, chars, modf, dc){
+  if (!chars.length) return [];
+  await die(`${label} DC ${dc} for ${chars.map(c=>c.name.split(' ')[0]).join(', ')}`, '—', 0, 'one d20 each');
+  const out = chars.map(c=>{ const d=r(20), t=d+modf(c); const ok=t>=dc; log(`&nbsp;&nbsp;${c.name}: d20 ${d}${modf(c)?(modf(c)>0?'+':'')+modf(c):''} = <span class="roll">${t}</span> ${ok?'<span class="good">pass</span>':'<span class="bad">fail</span>'}`); return {c,ok,t}; });
+  return out;
+}
+const SAVE = {STR:c=>c.stats?mod(c.stats.STR):0, DEX:c=>c.dex||0, CON:c=>c.stats?mod(c.stats.CON):0, INT:c=>c.int||0, WIS:c=>c.stats?mod(c.stats.WIS):0, CHA:c=>c.cha||0};
+
 // ---------- weather (§1) ----------
-function rollWeather(){
+async function rollWeather(){
   const h = hexAt(G.pos); const t = T('Daily weather');
-  let v = roll('2d6'); if (G.weather && G.weather.band==='Excellent') v = Math.max(v, roll('2d6'));
+  let v = await die('Daily weather · '+h.terr, '2d6');
+  if (G.weather && G.weather.band==='Excellent'){ const v2 = await die('Advantage from Excellent weather', '2d6'); v=Math.max(v,v2); }
   const row = t.rows.find(x=>+x[0]===v);
   let band = v<=4?'Stormy':v>=10?'Excellent':'Fair';
   const cl = climate(h.terr);
   const harsh = cl.harsh==='always' || (cl.harsh==='stormy' && band==='Stormy');
   if (band==='Stormy' && harsh) band='Severe';
-  G.weather = {name:row[TERR[h.terr].col], band, harsh, climate:cl.name}; G.wdays = r(4);
-  log(tag('Weather 2d6',v)+`<b>${G.weather.name}</b> — ${band}. ${cl.name} climate${harsh?' (<b>harsh</b>: double rations)':''}. Lasts ${G.wdays} day(s).`);
-  if (band==='Severe'){ log(T('Weather bands').rows[3][1]); weatherEvent(); }
+  G.weather = {name:row[TERR[h.terr].col], band, harsh, climate:cl.name};
+  log(`<b>${G.weather.name}</b> — ${band}. ${cl.name} climate${harsh?' (<b>harsh</b>: double rations)':''}. ${T('Weather bands').rows.find(x=>x[0].startsWith(band))?.[1]||''}`);
+  G.wdays = await die('How long it lasts', '1d4'); log(`It lasts ${G.wdays} day(s).`);
+  if (band==='Severe') await weatherEvent();
+  render();
 }
-function weatherEvent(){
+async function weatherEvent(){
   const h = hexAt(G.pos); const c = climate(h.terr).name;
   const t = G.weather.band==='Stormy'||G.weather.band==='Severe' ? (/Hot|Scorch|Swelter/.test(c)?T('Hot'):T('Cold')) : T('Fair-weather events');
-  const v = roll('2d6'); const row = pick(t,v);
-  log(tag(t.cap,v)+`<b>${row[0]}.</b> ${row[1]}`);
-  applyText(row[1]);
+  const v = await die('Weather event · '+t.cap, '2d6'); const row = pick(t,v);
+  log(`<b>${row[0]}.</b> ${row[1]}`);
+  await applyText(row[1]);
 }
 // light-touch reading of effect text: damage dice, saves, MC, rations
-function applyText(txt){
+async function applyText(txt){
   const save = (txt.match(/\b(STR|DEX|CON|INT|WIS|CHA)\b/)||[])[1];
   const dmg = (txt.match(/(\d+d\d+|\b1\b) damage|or (\d+d\d+)/)||[]);
   const amt = dmg[1]||dmg[2];
-  if (amt && save){ for (const c of alive()){ const k=check(save==='INT'?c.int:0,12); if(!k.ok) hurt(c, roll(amt), save+' save failed'); } }
-  else if (amt && /random character/.test(txt)) hurt(anyone(), roll(amt));
+  if (amt && save){ for (const k of await checks(save+' save', alive(), SAVE[save], 12)) if(!k.ok) hurt(k.c, await die(`Damage to ${k.c.name}`, amt)); }
+  else if (amt && /random character/.test(txt)){ const c = await whoRandom(); hurt(c, await die(`Damage to ${c.name}`, amt)); }
   if (/\+1 MC/.test(txt)){ G.mc+=1; log('The going is slower: +1 MC spent.'); }
-  const sp = txt.match(/(\d+d\d+) rations spoil/); if (sp){ const n=Math.min(G.rations,roll(sp[1])); G.rations-=n; log(`${n} rations spoil.`,'bad'); }
+  const sp = txt.match(/(\d+d\d+) rations spoil/); if (sp){ const n=Math.min(G.rations, await die('Rations spoiled', sp[1])); G.rations-=n; log(`${n} rations spoil.`,'bad'); }
   if (/Half the rations/.test(txt)){ const n=Math.ceil(G.rations/2); G.rations-=n; log(`${n} rations lost.`,'bad'); }
 }
+async function whoRandom(){ const a=alive(); if(a.length===1) return a[0]; const v=await die('Who? '+a.map((c,i)=>`${i+1} ${c.name.split(' ')[0]}`).join(' · '), '1d'+a.length); return a[v-1]; }
 
 // ---------- move (§2) ----------
-async function move(k){ try { return await move_(k); } catch(e){ console.error(e); (window.__errs=window.__errs||[]).push(e.stack); render(); } }
+let busy=false;
+async function move(k){ if(busy||G.wait) return; busy=true; try { await move_(k); } catch(e){ console.error(e); (window.__errs=window.__errs||[]).push(e.stack); } busy=false; render(); }
 async function move_(k){
   if (G.over) return;
   if (G.weather && G.weather.band==='Severe'){ log('Severe weather: no travel today. Make camp.','bad'); return; }
@@ -242,104 +272,117 @@ async function move_(k){
   const roadway = from.road && G.road.has(k);
   if (!roadway){
     let dc = 12 + (G.weather.band==='Stormy'?3:0) + (G.buffs.haze?3:0);
-    const nav = check(best(c=>c.int)+(G.buffs.favour?1:0), dc);
-    log(tag('Navigation INT DC '+dc, nav.tot)+(nav.ok?'On course.':'<b class="bad">Lost the way.</b> '+T('Navigation').rows[1][2]));
-    if (!nav.ok){ const n = nbrs(G.pos)[r(6)-1]; dest=n; k=key(n.q,n.r); }
-  }
+    const nav = best(c=>c.int)+(G.buffs.favour?1:0);
+    const v = await die(`Navigation · INT check DC ${dc} (best INT in the company)`, '1d20', nav);
+    if (v>=dc) log('On course.','good');
+    else { log('<b class="bad">Lost the way.</b> '+T('Navigation').rows[1][2]); const e = await die('Drift: which edge', '1d6'); const n = nbrs(G.pos)[e-1]; dest=n; k=key(n.q,n.r); }
+  } else log('The road leads the way: no navigation check.');
   h = hexAt(dest) || makeHex(dest);
-  if (h.terr==='Sea / Lake'){ h.seen=true; log(`${TERR['Sea / Lake'].ic} The way ends at open water. You turn back.`); G.mc+=1; render(); return; }
+  if (h.terr==='Sea / Lake'){ h.seen=true; log(`${TERR['Sea / Lake'].ic} The way ends at open water. You turn back.`); G.mc+=1; return; }
   G.mc += cost(h.terr); G.pos = dest;
   const fresh = !h.seen; h.seen = true; G.foraged=false;
-  log(`→ <b>${h.terr}</b>${h.road?' along the road':''}. (MC ${G.mc}/${budget()})`);
-  if (h.feature==='Settlement' && h.band==='City' && dist(dest,G.goal)===0){ render(); return win(); }
+  log(`→ <b>${h.terr}</b>${h.road?' along the road':''}. (MC ${G.mc}/${budget()})`); render();
+  if (h.feature==='Settlement' && h.band==='City' && dist(dest,G.goal)===0) return win();
   if (fresh){ await feature(h); await hexEvent(h); }
-  checkDeath(); render();
+  checkDeath();
 }
 
 // ---------- feature (§4) ----------
 async function feature(h){
   if (h.feature) return;
-  const v = roll('2d6'); const row = pick(T('Special feature'), v); let txt = h.road?row[0]:row[1];
-  if (/^1–3 Dungeon/.test(txt)) txt = r(6)<=3?'Dungeon':'Catacombs';
-  if (/^1–3 Catacombs/.test(txt)) txt = r(6)<=3?'Catacombs':'Cavern';
+  const v = await die('Special feature', '2d6'); const row = pick(T('Special feature'), v); let txt = h.road?row[0]:row[1];
+  if (/^1–3 Dungeon/.test(txt)) txt = (await die('Dungeon or Catacombs (1–3 / 4–6)','1d6'))<=3?'Dungeon':'Catacombs';
+  if (/^1–3 Catacombs/.test(txt)) txt = (await die('Catacombs or Cavern (1–3 / 4–6)','1d6'))<=3?'Catacombs':'Cavern';
   let f = txt.split(/[.—]/)[0].trim();
   if (/Village/.test(f) && /Desert|Glacier/.test(h.terr)) f='Empty landscape';
-  if (/Settlement/.test(txt)){ const b=r(6); h.band=b<=3?'Village':b<=5?'Town':'City'; f='Settlement'; h.fname = name().split(' ')[1]+(h.band==='City'?' City':h.band==='Town'?'ton':'by'); }
+  if (/Settlement/.test(txt)){ const b=await die('Settlement band: 1–3 Village, 4–5 Town, 6 City','1d6'); h.band=b<=3?'Village':b<=5?'Town':'City'; f='Settlement'; h.fname = name().split(' ')[1]+(h.band==='City'?' City':h.band==='Town'?'ton':'by'); }
   if (/^Village/.test(f)){ f='Settlement'; h.band='Village'; h.fname=name().split(' ')[1]+'by'; }
   if (/Trading Post|Tavern/.test(f)){ h.band='Post'; h.fname=f; f='Settlement'; }
   h.feature=f;
-  if (f!=='Empty landscape') log(tag('Special feature 2d6',v)+`<b>${h.fname?h.band+': '+h.fname:f}.</b> ${(T('What each feature is').rows.find(x=>f.startsWith(x[0]))||['',''])[1]}`);
+  log(f==='Empty landscape'?'No feature: empty landscape.':`<b>${h.fname?h.band+': '+h.fname:f}.</b> ${(T('What each feature is').rows.find(x=>f.startsWith(x[0]))||['',''])[1]}`);
+  render();
 }
 async function exploreFeature(h){
+  if(busy||G.wait) return; busy=true;
+  try {
   h.done = true; const f = h.feature;
-  if (/Shrine/.test(f)){ const v=r(6), row=pick(T('Shrine'),v); log(tag('Shrine 1d6',v)+`<b>${row[0]}.</b> ${row[1]}`,'good'); if(/attack/.test(row[1]))G.buffs.atk=1; if(/AC/.test(row[1]))alive().forEach(c=>c.acB=1); return render(); }
-  if (/Portal/.test(f)){ log('The portal hums. You step through…'); const d={q:G.pos.q+r(5)-2,r:G.pos.r+r(5)-2}; if(dist(d,G.goal)<dist(G.pos,G.goal)) log('…and come out closer to the City.','good'); G.pos=d; const hh=hexAt(d)||makeHex(d); if(hh.terr==='Sea / Lake')hh.terr='Grasslands'; hh.seen=true; return render(); }
-  if (/Monastery|Keep/.test(f)){ log(`The ${f} gives you shelter. A safe night here; you may rest.`,'good'); G.safe=true; return render(); }
-  // dungeon-like: a couple of fights and a hoard
-  const rooms = 1 + r(3); log(`You delve into the ${f}: ${rooms} chambers.`);
-  for (let i=0;i<rooms && alive().length;i++){
-    if (r(6)<=3) await encounter(['VERMIN','MINIONS','MINIONS','WEIRD','BOSS'][Math.min(4,i+r(2)-1)], h, true);
-    else { const v=r(100),row=pick(T('Treasure 0–3'),v); gainLoot(row[0], 'Treasure 0–3', v); }
+  if (/Shrine/.test(f)){ const v=await die('Shrine','1d6'), row=pick(T('Shrine'),v); log(`<b>${row[0]}.</b> ${row[1]}`,'good'); if(/attack/.test(row[1]))G.buffs.atk=1; if(/AC/.test(row[1]))alive().forEach(c=>c.acB=1); }
+  else if (/Portal/.test(f)){ log('The portal hums. You step through…'); const a=await die('Portal: shift east–west','1d5'), b=await die('Portal: shift north–south','1d5'); const d={q:G.pos.q+a-3,r:G.pos.r+b-3}; G.pos=d; const hh=hexAt(d)||makeHex(d); if(hh.terr==='Sea / Lake')hh.terr='Grasslands'; hh.seen=true; log(`…and come out ${dist(d,G.goal)} hexes from the City.`); }
+  else if (/Monastery|Keep/.test(f)){ log(`The ${f} gives you shelter. A safe night here; you may rest.`,'good'); G.safe=true; }
+  else {
+    const rooms = await die(`How many chambers in the ${f}`, '1d3+1');
+    for (let i=0;i<rooms && alive().length;i++){
+      const v = await die(`Chamber ${i+1}: 1–3 occupied, 4–6 a find`, '1d6');
+      if (v<=3) await encounter(['VERMIN','MINIONS','MINIONS','WEIRD','BOSS'][Math.min(4,i)], h, true);
+      else { const tv=await die('Treasure 0–3','1d100'); gainLoot(pick(T('Treasure 0–3'),tv)[0]); }
+    }
+    if (alive().length){ const tb=avgLv()>=4?'Treasure 4–6':'Treasure 0–3'; const tv=await die('The hoard · '+tb,'1d100'); gainLoot(pick(T(tb),tv)[0]); }
   }
-  if (alive().length){ const v=r(100), row=pick(T(G.party[0].lv>=4?'Treasure 4–6':'Treasure 0–3'),v); gainLoot(row[0],'Hoard',v); }
-  checkDeath(); render();
+  checkDeath();
+  } finally { busy=false; render(); }
 }
-function gainLoot(txt, tbl, v){
+function gainLoot(txt){
   let gp=0; const m = txt.match(/\((\d+) (gp|sp|cp)( each)?\)|(\d+) (gp|sp|cp)/);
   if (m){ const n=+(m[1]||m[4]), u=m[2]||m[5]; gp = u==='gp'?n:u==='sp'?n/10:n/100; const each=txt.match(/(Two|Pair|trio|five|Six|six)/i); if(m[3]&&each) gp*= ({two:2,pair:2,trio:3,five:5,six:6})[each[1].toLowerCase()]; }
   gp = Math.max(0, Math.round(gp));
-  if (/^\d+ (gp|sp|cp)|in a|in the/.test(txt) && /(\d+) (gp|sp|cp) (in|on)/.test(txt)){ G.gold+=gp; log(tag(tbl,v)+`${txt} → <b>+${gp} gp</b>`,'good'); }
-  else { G.loot.push({txt,gp}); log(tag(tbl,v)+`Found: <b>${txt}</b>`,'good'); }
+  if (/(\d+) (gp|sp|cp) (in|on)/.test(txt)){ G.gold+=gp; log(`${txt} → <b>+${gp} gp</b>`,'good'); }
+  else { G.loot.push({txt,gp}); log(`Found: <b>${txt}</b>`,'good'); }
   G.xp += gp>=50?3:gp>=10?1:0; levelUp();
 }
 
 // ---------- hex events (§5) ----------
-async function hexEvent(h){
+async function hexEvent(h, noWeather){
   const t = h.road ? T('Hex event — hex WITH') : T('Hex event — ROADLESS');
-  const v = roll('3d6'); const row = pick(t, v); const txt=row[0];
-  log(tag(h.road?'Hex event (road) 3d6':'Hex event (roadless) 3d6', v)+txt);
+  const v = await die(h.road?'Hex event (road)':'Hex event (roadless)', '3d6'); const row = pick(t, v); const txt=row[0];
+  log(txt);
   if (/^Quiet/.test(txt)) return;
   if (/^Divine favour/.test(txt)) { G.buffs.favour=1; return; }
-  if (/^Hidden chest/.test(txt)) { G.clues++; const tv=r(100); gainLoot(pick(T('Treasure 0–3'),tv)[0],'Treasure 0–3',tv); return; }
-  if (/^Dragon/.test(txt)) { const dc=/Forest|Jungle|Swamp|Mountains/.test(h.terr)?12:15; const k=check(best(c=>c.dex+(c.cls==='Thief'?1:0)),dc); log(tag('DEX DC '+dc,k.tot)+(k.ok?'You hide; the shadow passes.':'<b>It stoops.</b> Fire washes the column.')); if(!k.ok) for(const c of alive()) hurt(c, roll('2d6'),'dragonfire'); return; }
-  if (/^Extraordinary/.test(txt)) return encounter(r(6)<=3?'WEIRD':'BOSS',h);
+  if (/^Hidden chest/.test(txt)) { G.clues++; const tv=await die('What is in the chest · Treasure 0–3','1d100'); gainLoot(pick(T('Treasure 0–3'),tv)[0]); return; }
+  if (/^Dragon/.test(txt)) { const dc=/Forest|Jungle|Swamp|Mountains/.test(h.terr)?12:15; const k=await checks('DEX to hide', alive(), SAVE.DEX, dc); if(k.some(x=>!x.ok)){ log('<b>It stoops.</b> Fire washes the column.','bad'); for(const x of k) if(!x.ok) hurt(x.c, await die(`Dragonfire on ${x.c.name}`,'2d6')); } else log('You hide; the shadow passes.'); return; }
+  if (/^Extraordinary/.test(txt)) return encounter((await die('1–3 Weird monster, 4–6 Boss','1d6'))<=3?'WEIRD':'BOSS',h);
   if (/^Weird/.test(txt)) return encounter('WEIRD',h);
-  if (/^Weather/.test(txt)) { weatherEvent(); return; }
+  if (/^Weather/.test(txt)) { await weatherEvent(); if(!noWeather) return hexEvent(h,true); return; }
   if (/^Biome denizens/.test(txt)) return encounter('DENIZENS',h);
   if (/^NPC/.test(txt)) return npc();
   if (/^Vermin/.test(txt)) return encounter('VERMIN',h);
-  if (/^Minions/.test(txt)) { const k=check(best(c=>c.dex+(c.cls==='Thief'?1:0)),12); if(k.ok){log(tag('DEX DC 12',k.tot)+'You slip past unseen.');return;} return encounter('MINIONS',h); }
-  if (/^Imperial patrol/.test(txt)) { G.buffs.patrol=1; log('An imperial patrol rides with you while you hold the road.','good'); return hexEvent(h); }
+  if (/^Minions/.test(txt)) { const k=await checks('DEX to slip past', alive(), SAVE.DEX, 12); if(k.every(x=>x.ok)){log('You slip past unseen.','good');return;} return encounter('MINIONS',h); }
+  if (/^Imperial patrol/.test(txt)) { G.buffs.patrol=1; log('An imperial patrol rides with you while you hold the road.','good'); return hexEvent(h,noWeather); }
   if (/^Cave entrance/.test(txt)) { h.feature = h.feature&&h.feature!=='Empty landscape'?h.feature:'Cave'; return; }
   if (/^Trouble/.test(txt)) return trouble();
-  if (/^Ambush/.test(txt)) return encounter(whatAppears(),h,false,true);
+  if (/^Ambush/.test(txt)) return encounter(await whatAppears(),h,false,true);
   if (/^Wilderness hazard/.test(txt)) return hazard(h);
-  if (/^Corpse/.test(txt)) { const d=r(6); log(tag('Corpse 1d6',d)+['','Disease: CON DC 12.','Nothing.','Nothing.','1d6 gp.','3d6 gp.','One potion.'][d]);
-    if(d===1){const c=anyone(),k=check(0,12); if(!k.ok){c.con--; log(c.name+' sickens: −1 CON.','bad');}} if(d===4)G.gold+=r(6); if(d===5)G.gold+=roll('3d6'); if(d===6)G.loot.push({txt:'Healing potion',gp:25,potion:1}); }
+  if (/^Corpse/.test(txt)) { const d=await die('Corpse','1d6'); log(['','Disease: CON DC 12.','Nothing.','Nothing.','1d6 gp.','3d6 gp.','One potion.'][d]);
+    if(d===1){ const c=await whoRandom(); const k=await checks('CON vs disease',[c],SAVE.CON,12); if(!k[0].ok){c.con--; log(c.name+' sickens: −1 CON.','bad');}}
+    if(d===4)G.gold+=await die('Coins','1d6'); if(d===5)G.gold+=await die('Coins','3d6'); if(d===6)G.loot.push({txt:'Healing potion',gp:25,potion:1}); }
 }
-function whatAppears(){ const v=roll('2d6'); const row=pick(T('What appears'),v); log(tag('What appears 2d6',v)+row[0]); return /Boss/.test(row[0])?'BOSS':/Minion/.test(row[0])?'MINIONS':/Vermin/.test(row[0])?'VERMIN':/Weird/.test(row[0])?'WEIRD':'DENIZENS'; }
-function trouble(){
-  const v=r(10), row=pick(T('Troubles'),v); log(tag('Trouble 1d10',v)+`<b>${row[0]}.</b> ${row[1]}`,'bad');
-  if (v===4){ const n=nbrs(G.pos)[r(6)-1]; const h=hexAt(n)||makeHex(n); if(h.terr!=='Sea / Lake'){G.pos=n; h.seen=true;} G.mc++; }
-  else if (v===5||v===6||v===8){ for(const c of (v===5?[anyone(),anyone()]:alive())){ if(c&&!check(0,12).ok){ c.con--; log(`${c.name}: −1 CON.`,'bad'); } } }
-  else if (v===2){ const d=r(6); if(d<=2){G.mc=budget(); log('You must camp.');} else if(d<=4&&G.torches){G.torches--; log('A torch is lost to the wind.');} else G.mc++; }
-  else applyText(row[1]);
+async function whatAppears(){ const v=await die('What appears','2d6'); const row=pick(T('What appears'),v); log(row[0]); return /Boss/.test(row[0])?'BOSS':/Minion/.test(row[0])?'MINIONS':/Vermin/.test(row[0])?'VERMIN':/Weird/.test(row[0])?'WEIRD':'DENIZENS'; }
+async function trouble(){
+  const v=await die('Trouble','1d10'), row=pick(T('Troubles'),v); log(`<b>${row[0]}.</b> ${row[1]}`,'bad');
+  if (v===4){ const d=await die('Lost: 1–2 back, 3–6 a random hex','1d6'); G.mc++; if(d>2){ const n=nbrs(G.pos)[(await die('Which edge','1d6'))-1]; const h=hexAt(n)||makeHex(n); if(h.terr!=='Sea / Lake'){G.pos=n; h.seen=true;} } }
+  else if (v===5||v===6||v===8){ const who = v===5?[...new Set([await whoRandom(), await whoRandom()])]:alive(); const save=v===8?'WIS':'CON'; for(const k of await checks(save, who, SAVE[save], 12)) if(!k.ok){ k.c.con--; log(`${k.c.name}: −1 CON.`,'bad'); } }
+  else if (v===2){ const d=await die('Bad weather','1d6'); if(d<=2){G.mc=budget(); log('You must camp.');} else if(d<=4&&G.torches){G.torches--; log('A torch is lost to the wind.');} else G.mc++; }
+  else if (v===7){ const c=await whoRandom(); hurt(c, await die(`Injury to ${c.name}`,'1d4')); }
+  else await applyText(row[1]);
 }
 async function hazard(h){
-  const v=roll('2d6'), row=pick(T('Wilderness'),v); log(tag('Wilderness hazard 2d6',v)+`<b>${row[0]}.</b> ${row[1]}`);
+  const v=await die('Wilderness hazard','2d6'), row=pick(T('Wilderness'),v); log(`<b>${row[0]}.</b> ${row[1]}`);
   if (v===3) return trouble();
   if (v===2) return encounter('WEIRD',h);
-  if (v===12){ return modal(`<h2>Toll taker</h2><p>${row[1]}</p>`, [['Pay 10 gp',()=>{G.gold=Math.max(0,G.gold-10);}],['Fight',()=>encounter('MINIONS',h)],['Slip past (DEX)',()=>{if(!check(1,12).ok){log('Spotted!','bad');return encounter('MINIONS',h);}log('You slip by.');}]]); }
-  if (v===8){ const c=anyone(); if(!check(c.cls==='Thief'?2:0,12).ok) hurt(c,r(6),"hunter's trap"); }
-  if (v===9){ const c=anyone(); if(!check(0,12).ok){ const n=Math.min(G.rations,r(4)); G.rations-=n; log(`${c.name} struggles free of the quicksand; ${n} rations lost.`,'bad'); } }
+  if (v===12){ let choice; await modal(`<h2>Toll taker</h2><p>${row[1]}</p>`, [['Pay 10 gp',()=>choice='pay'],['Fight',()=>choice='fight'],['Slip past (DEX)',()=>choice='slip']]);
+    if (choice==='pay'){ G.gold=Math.max(0,G.gold-10); log('You pay.'); return; }
+    if (choice==='slip'){ const k=await checks('DEX to slip past', alive(), SAVE.DEX, 12); if(k.every(x=>x.ok)){ log('You slip by.','good'); return; } log('Spotted!','bad'); }
+    return encounter('MINIONS',h); }
+  if (v===8){ const c=await whoRandom(); const k=await checks('DEX vs trap',[c],SAVE.DEX,12); if(!k[0].ok) hurt(c, await die('Trap damage','1d6')); }
+  if (v===9){ const c=await whoRandom(); const k=await checks('STR out of the quicksand',[c],SAVE.STR,12); if(!k[0].ok){ const n=Math.min(G.rations, await die('Rations lost','1d4')); G.rations-=n; log(`${c.name} struggles free; ${n} rations lost.`,'bad'); } }
   if (v===6||v===4||v===7) G.mc++;
   if (v===10) G.mc=Math.max(0,G.mc-1);
 }
-function npc(){
-  const v=r(20), row=pick(T('NPC encounter'),v);
-  const rv = roll('2d6'); const re = pick(T('3. Reaction'), rv);
-  log(tag('NPC 1d20',v)+`<b>${row[0]}.</b> ${row[1]} `+tag('Reaction',rv)+re[0]);
-  if (/Horse trader/.test(row[0])) return modal(`<h2>Horse trader</h2><p>${row[1]}</p>`,[['Buy a mount (30 gp)',()=>{if(G.gold>=30){G.gold-=30;G.mounts++;}}],['Pass',()=>{}]]);
+async function npc(){
+  const v=await die('NPC encounter','1d20'), row=pick(T('NPC encounter'),v);
+  log(`<b>${row[0]}.</b> ${row[1]}`);
+  const rv = await die('Reaction · 2d6 + best CHA', '2d6', best(c=>c.cha||0)); const re = pick(T('3. Reaction'), Math.max(0,rv)) || ['Friendly'];
+  log(`<b>${re[0]}.</b> ${re[1]||''}`);
+  if (/Horse trader/.test(row[0])){ let buy; await modal(`<h2>Horse trader</h2><p>${row[1]}</p>`,[['Buy a mount (30 gp)',()=>buy=1],['Pass',()=>{}]]); if(buy&&G.gold>=30){G.gold-=30;G.mounts++;} return; }
   if (/Hunters/.test(row[0])) { G.rations += alive().length; log('You share their fire and their meat.','good'); }
   if (/Bandits|Wagon destroyed/.test(row[0]) || re[0]==='Hostile') return encounter('MINIONS', hexAt(G.pos));
 }
@@ -355,60 +398,84 @@ function foeTable(type, h){
   const fk = type+be; if (G.factions[fk]===undefined || !tabs[G.factions[fk]]) G.factions[fk]=r(tabs.length)-1;
   return tabs[G.factions[fk]];
 }
-function rollFoe(type, h){
-  const t = foeTable(type,h); const v = roll(t.die);
-  const row = t.rows.find(x=>{const a=range(x.foe&&x.r);return a&&v>=a[0]&&v<=a[1];}) || t.rows[r(t.rows.length)-1];
+async function rollFoe(type, h){
+  const t = foeTable(type,h); const v = await die(`${t.name} (${type.toLowerCase()})`, t.die);
+  const row = t.rows.find(x=>{const a=range(x.r);return a&&v>=a[0]&&v<=a[1];}) || t.rows[r(t.rows.length)-1];
   const b = row.b && BE.blocks[row.b];
-  let no = Math.max(1, roll(row.no.replace(/[^0-9d+\-]/g,'')||'1'));
+  const ne = row.no.replace(/[^0-9d+\-]/g,'')||'1';
+  let no = /d/.test(ne) ? Math.max(1, await die(`How many ${row.foe}`, ne)) : +ne||1;
   const lv = b?b.lv:({VERMIN:1,MINIONS:2,DENIZENS:2,WEIRD:4,BOSS:6})[type];
   // keep it survivable for a small company: cap total levels
-  const cap = Math.max(2, 4*avgLv()+2); while (no>1 && no*lv>cap) no--;
+  const cap = Math.max(2, 4*avgLv()+2); const was=no; while (no>1 && no*lv>cap) no--; if(no<was) log(`(Only ${no} of them close in: the rest hang back.)`);
   const am = b && b.atk.match(/([+-]\d+)\s*\(([^)]*?\d*d\d+(?:\s*[+-]\s*\d+)?)/);
   return {name: b?b.name:row.foe, table:t.name, v, no, type,
     ac: b?b.ac:10+lv, hp: b?b.hp:4+lv*4, atk: am?+am[1]:lv+1, dmg: am?am[2].replace(/[^0-9d+\-]/g,''):'1d6', lv, b};
 }
 const avgLv = () => alive().reduce((a,c)=>a+c.lv,0)/Math.max(1,alive().length);
+// the creature's own "Reactions (d6)" line, if it has one
+function ownReactions(b){ const l = b && b.traits.find(x=>/Reactions \(d6\)/.test(x)); if(!l) return null;
+  return l.replace(/.*Reactions \(d6\)\.?\*?\*?\s*/,'').split('·').map(s=>{ const m=s.trim().match(/^(\d+)(?:[–-](\d+))?\s+(.*)$/); return m?{a:+m[1],b:+(m[2]||m[1]),t:m[3]}:null; }).filter(Boolean); }
 
-function encounter(type, h, inDungeon, ambush){
-  return new Promise(res=>{ try {
-    const f = rollFoe(type, h);
-    const dist = pick(T('1. Distance'), r(6))[0], act = pick(T('2. Activity'), roll('2d6'));
-    const rv = roll('2d6'); const re = pick(T('3. Reaction'), rv)[0];
-    const hostile = ambush || type==='BOSS' || re==='Hostile' || (re==='Suspicious' && type!=='DENIZENS' && r(2)===1);
-    const b=f.b;
-    log(tag(f.table+' '+f.v, f.no+'×')+`<b>${f.name}</b> (${type.toLowerCase()}) — ${dist}, ${act?act[0].toLowerCase():''}. Reaction: ${re}.`);
-    const html = `<h2>${f.no} × ${f.name}</h2><p><i>${type.toLowerCase()} · ${f.table}</i></p>${b&&b.desc?`<p>${b.desc}</p>`:''}
-      ${b?`<div class="stat">${b.stat}</div>${b.traits.slice(0,3).map(x=>`<p style="font-size:13px">${x.replace(/\*\*(.*?)\*\*/g,'<b>$1</b>')}</p>`).join('')}`:''}
-      <p>Range <b>${dist}</b>. ${ambush?'<b class="bad">Ambush! They strike first.</b>':`Reaction <b>${re}</b>${hostile?' — they mean violence.':'.'}`}</p>`;
-    const done = () => { checkDeath(); render(); res(); };
-    const opts = [['Fight', ()=>fight(f, ambush).then(done)]];
-    if (!ambush) opts.push(['Flee', ()=>{ const k=check(best(c=>c.dex+(c.cls==='Thief'?1:0)),dist==='Close'?15:dist==='Near'?12:9); if(k.ok){log(tag('Flee',k.tot)+'You get clear.');G.mc++;done();} else {log(tag('Flee',k.tot)+'<b>They catch you.</b>','bad'); fight(f,true).then(done);} }]);
-    if (!hostile) opts.push(['Let them be', ()=>{ log('You give them a wide berth.'); done(); }]);
-    else if (!ambush && type!=='DENIZENS' && type!=='VERMIN') opts.push(['Pay them off (15 gp)', ()=>{ if(G.gold>=15 && r(6)>2){G.gold-=15; log('Coin changes hands. They let you go.');done();} else {log('They take nothing but blood.','bad'); fight(f,false).then(done);} }]);
-    modal(html, opts);
-  } catch(e){ (window.__errs=window.__errs||[]).push('ENC '+e.stack); res(); } });
-}
-async function fight(f, theyFirst){ try { return Promise.resolve(fight_(f, theyFirst)); } catch(e){ (window.__errs=window.__errs||[]).push('FIGHT '+e.stack); } }
-function fight_(f, theyFirst){
-  const foes = Array.from({length:f.no},()=>({hp:f.hp}));
-  let round = 0, lines=[];
-  const half = Math.ceil(f.no/2);
-  while (alive().length && foes.some(x=>x.hp>0) && round<20){
-    round++;
-    const pturn = () => { for (const c of alive()){ const t=foes.find(x=>x.hp>0); if(!t)break;
-      if (c.cls==='Priest' && c.heal!==G.day){ const w=alive().find(x=>x.hp<=x.max/3); if(w){ c.heal=G.day; const n=r(6)+1; w.hp=Math.min(w.max,w.hp+n); lines.push(`${c.name} heals ${w.name} (+${n}).`); continue; } }
-      const a=r(20)+c.atk+(G.buffs.atk||0)+(G.buffs.favour||0)+(G.buffs.patrol?1:0);
-      if (a>=f.ac || a-c.atk-(G.buffs.atk||0)>=20){ const d=roll(c.dmg)+(a-c.atk>=20?roll(c.dmg):0); t.hp-=d; lines.push(`${c.name} hits for ${d}${t.hp<=0?' — <b>it falls</b>':''}.`); } } };
-    const fturn = () => { for (const x of foes) if (x.hp>0){ const c=anyone(); if(!c)break; const a=r(20)+f.atk; if(a>=c.ac+(c.acB||0)){ const d=Math.max(1,roll(f.dmg)); c.hp=Math.max(0,c.hp-d); lines.push(`<span class="bad">${f.name} hits ${c.name} for ${d}${c.hp<=0?' — <b>down</b>':''}.</span>`);} } };
-    if (theyFirst && round===1){ fturn(); pturn(); } else { pturn(); fturn(); }
-    const left = foes.filter(x=>x.hp>0).length;
-    if (left && left<=half && f.type!=='BOSS' && !(f.b&&/Mindless|Immune to morale/.test(f.b.traits.join(' '))) && r(20)+Math.floor(f.lv/2)<11){ lines.push(`<b>Morale breaks.</b> The ${f.name} scatter.`); foes.forEach(x=>x.hp=0); }
+async function encounter(type, h, inDungeon, ambush){
+  const f = await rollFoe(type, h); const b=f.b;
+  log(`<b>${f.no} × ${f.name}</b>${b&&b.desc?' — <i>'+b.desc+'</i>':''}`);
+  const dv = await die('1. Distance','1d6'); const dist = pick(T('1. Distance'), dv)[0]; log('Range: <b>'+dist+'</b>.');
+  const av = await die('2. Activity','2d6'); const act = pick(T('2. Activity'), av); log('Doing: <b>'+(act?act[0]:'—')+'</b>.');
+  let re, hostile;
+  if (ambush){ log('<b class="bad">Ambush!</b> They are undetected until they strike.'); hostile=true; re='Hostile'; }
+  else {
+    const rv = await die('3. Reaction · 2d6 + best CHA', '2d6', best(c=>c.cha||0)); re = (pick(T('3. Reaction'), Math.max(0,rv))||['Friendly'])[0];
+    const rr = T('3. Reaction').rows.find(x=>x[1]===re); log(`<b>${re}.</b> ${rr?rr[2]:''}`);
+    const own = ownReactions(b);
+    if (own){ const ov = await die(`How a ${f.name} behaves · its Reactions table`, '1d6'); const o = own.find(x=>ov>=x.a&&ov<=x.b); if(o) log(`<i>${o.t}</i>`); }
+    hostile = type==='BOSS' || re==='Hostile' || (re==='Suspicious' && type!=='DENIZENS' && type!=='VERMIN');
   }
-  log(`<details><summary>Combat, ${round} rounds</summary>${lines.join('<br>')}</details>`);
+  const html = `<h2>${f.no} × ${f.name}</h2><p><i>${type.toLowerCase()} · ${f.table}</i></p>${b&&b.desc?`<p>${b.desc}</p>`:''}
+    ${b?`<div class="stat">${b.stat}</div>${b.traits.map(x=>`<p style="font-size:13px">${x.replace(/\*\*(.*?)\*\*/g,'<b>$1</b>')}</p>`).join('')}`:''}
+    <p>Range <b>${dist}</b> · ${act?act[0]:''} · ${ambush?'<b class="bad">Ambush: they strike first.</b>':`Reaction <b>${re}</b>${hostile?' — they mean violence.':'.'}`}</p>
+    <p style="font-size:13px;color:var(--soft)">The rolls are in the log. Choose what the company does.</p>`;
+  let choice;
+  const opts = [['Fight', ()=>choice='fight']];
+  if (!ambush) opts.push(['Flee', ()=>choice='flee']);
+  if (!hostile) opts.push(['Let them be', ()=>choice='leave']);
+  else if (!ambush && type!=='DENIZENS' && type!=='VERMIN') opts.push(['Pay them off (15 gp)', ()=>choice='pay']);
+  await modal(html, opts);
+  if (choice==='leave'){ log('You give them a wide berth.'); return; }
+  if (choice==='flee'){ const dc = dist==='Close'?15:dist==='Near'?12:9; const v = await die(`Flee · DEX check DC ${dc} (best DEX)`, '1d20', best(c=>c.dex+(c.cls==='Thief'?1:0)));
+    if (v>=dc){ log('You get clear.','good'); G.mc++; return; } log('<b>They catch you.</b>','bad'); return fight(f,true); }
+  if (choice==='pay'){ if (G.gold<15){ log('You have not got it.','bad'); return fight(f,false); } const v=await die('Will they take the coin? (3–6 yes)','1d6'); if(v>2){ G.gold-=15; log('Coin changes hands. They let you go.'); return; } log('They take nothing but blood.','bad'); return fight(f,false); }
+  return fight(f, ambush);
+}
+async function fight(f, theyFirst){
+  const foes = Array.from({length:f.no},()=>({hp:f.hp}));
+  let round = 0;
+  const half = Math.ceil(f.no/2);
+  const mindless = f.b&&/Mindless|Immune to morale/.test(f.b.traits.join(' '));
+  log(`<b>Combat</b> with ${f.no} × ${f.name} (AC ${f.ac}, HP ${f.hp} each, attack +${f.atk}, ${f.dmg}).`);
+  while (alive().length && foes.some(x=>x.hp>0) && round<30){
+    round++;
+    await die(`Combat · round ${round} (${foes.filter(x=>x.hp>0).length} ${f.name} standing)`, '—', 0, 'every attack this round');
+    const lines=[];
+    const pturn = () => { for (const c of alive()){ const t=foes.find(x=>x.hp>0); if(!t)break;
+      if (c.cls==='Priest' && c.heal!==G.day){ const w=alive().find(x=>x.hp<=x.max/3); if(w){ c.heal=G.day; const n=r(6)+1; w.hp=Math.min(w.max,w.hp+n); lines.push(`${c.name} heals ${w.name}: 1d6+1 = ${n}.`); continue; } }
+      const bon=c.atk+(G.buffs.atk||0)+(G.buffs.favour||0)+(G.buffs.patrol?1:0); const d20=r(20), a=d20+bon;
+      if (d20===20 || (d20!==1 && a>=f.ac)){ const d=roll(c.dmg)+(d20===20?roll(c.dmg):0); t.hp-=d; lines.push(`${c.name}: d20 ${d20}+${bon} = ${a} vs AC ${f.ac} — <b>hit</b>, ${c.dmg} → ${d}${d20===20?' (crit)':''}${t.hp<=0?' — <b>it falls</b>':''}.`); }
+      else lines.push(`${c.name}: d20 ${d20}+${bon} = ${a} vs AC ${f.ac} — miss.`); } };
+    const fturn = () => { for (const x of foes) if (x.hp>0){ const a0=alive(); if(!a0.length)break; const c=a0[r(a0.length)-1]; const d20=r(20), a=d20+f.atk, ac=c.ac+(c.acB||0);
+      if (d20===20 || (d20!==1 && a>=ac)){ const d=Math.max(1,roll(f.dmg)); c.hp=Math.max(0,c.hp-d); lines.push(`<span class="bad">${f.name} → ${c.name}: d20 ${d20}+${f.atk} = ${a} vs AC ${ac} — hit, ${f.dmg} → ${d}${c.hp<=0?' — <b>down</b>':''}.</span>`);}
+      else lines.push(`${f.name} → ${c.name}: d20 ${d20}+${f.atk} = ${a} vs AC ${ac} — miss.`); } };
+    if (theyFirst && round===1){ fturn(); pturn(); } else { pturn(); fturn(); }
+    log(lines.join('<br>')); render();
+    const left = foes.filter(x=>x.hp>0).length;
+    if (left && left<=half && f.type!=='BOSS' && !mindless && !foes.moraleDone){ foes.moraleDone=true;
+      const mv = await die(`Morale · ${f.name} at half strength · WIS DC 15`, '1d20', Math.floor(f.lv/2));
+      if (mv<15){ log(`<b>Morale breaks.</b> The ${f.name} scatter.`,'good'); foes.forEach(x=>x.hp=0); } else log('They hold.'); }
+  }
+  checkDeath();
   if (alive().length && !foes.some(x=>x.hp>0)){
     const xp = f.lv*f.no; G.xp += xp; log(`Victory. +${xp} XP.`,'good');
-    if (f.type!=='VERMIN' && f.type!=='DENIZENS' && r(6)>=3){ const tbl=f.lv>=7?'Treasure 7–9':f.lv>=4?'Treasure 4–6':'Treasure 0–3'; const v=r(100); gainLoot(pick(T(tbl),v)[0],tbl,v); }
-    if (f.type==='DENIZENS' && r(2)===1){ const n=r(4); G.rations+=n; log(`You butcher the kill: +${n} rations.`,'good'); }
+    if (f.type!=='VERMIN' && f.type!=='DENIZENS'){ const tv=await die('Do they carry anything? (3–6 yes)','1d6'); if(tv>=3){ const tbl=f.lv>=7?'Treasure 7–9':f.lv>=4?'Treasure 4–6':'Treasure 0–3'; const v=await die(tbl,'1d100'); gainLoot(pick(T(tbl),v)[0]); } }
+    if (f.type==='DENIZENS'){ const bv=await die('Is it good eating? (4–6 yes)','1d6'); if(bv>=4){ const n=await die('Rations from the kill','1d4'); G.rations+=n; log(`+${n} rations.`,'good'); } }
     levelUp();
   }
 }
@@ -417,49 +484,54 @@ function levelUp(){
 }
 
 // ---------- forage (§8.2) & camp (§8) ----------
-function forage(){
+async function forage(){
+  if(busy||G.wait) return; busy=true;
+  try {
   const h = hexAt(G.pos); const row = T('Forage, hunt or fish').rows.find(x=>x[0]===h.terr) || T('Forage, hunt or fish').rows[0];
   G.foraged = true; let got = 0;
-  for (const c of alive()){
-    const dc = G.weather.harsh ? 18 : +row[2]||15; const k = check(c.int + (G.buffs.bloom?3:0), dc);
-    if (k.ok){ const v=roll('2d6'), w=pick(T('What the hunt brings'),v); got += +w[0]; log(tag(`${c.name} hunts DC ${dc}`,k.tot)+`${w[1]} (+${w[0]})`,'good'); if(v===12) { G.rations+=got; got=0; encounter(whatAppears(),h); } }
-    else { const m=r(10), mr=pick(T('Mishaps'),m); log(tag(`${c.name} hunts DC ${dc}`,k.tot)+'Nothing. '+(m>4?mr[1]:'')); if(/1 damage/.test(mr[1])&&m>4) hurt(c,1); }
+  const dc = G.weather.harsh ? 18 : +row[2]||15;
+  for (const k of await checks('Hunt · INT', alive(), c=>c.int+(G.buffs.bloom?3:0), dc)){
+    if (k.ok){ const v=await die(`What ${k.c.name} brings back`,'2d6'), w=pick(T('What the hunt brings'),v); got += +w[0]; log(`${w[1]} (+${w[0]} rations)`,'good'); if(v===12){ G.rations+=got; got=0; await encounter(await whatAppears(),h); } }
+    else { const m=await die(`Mishap for ${k.c.name}`,'1d10'), mr=pick(T('Mishaps'),m); log(mr[1]); if(/1 damage/.test(mr[1])) hurt(k.c,1); }
   }
-  G.rations += got; G.mc = Math.min(budget(), G.mc+2); log(`Foraging takes half the day (MC +2). +${got} rations.`); render();
+  G.rations += got; G.mc = Math.min(budget(), G.mc+2); log(`Foraging takes half the day (MC +2). +${got} rations.`);
+  } finally { busy=false; render(); }
 }
-async function camp(){ try { return await camp_(); } catch(e){ console.error(e); (window.__errs=window.__errs||[]).push(e.stack); render(); } }
+async function camp(){ if(busy||G.wait) return; busy=true; try { await camp_(); } catch(e){ console.error(e); (window.__errs=window.__errs||[]).push(e.stack); } busy=false; render(); }
 async function camp_(){
   const h = hexAt(G.pos);
+  if (!G.weather) await rollWeather();
   log(`Camp in the ${h.terr.toLowerCase()}.`);
   // daytime encounter checks (2 × 1-in-6) for the half-days just travelled
-  for (let i=0;i<2;i++) if (r(6)===1 && alive().length){ log(tag('Encounter check','1')+'Something finds you on the road.'); await encounter(whatAppears(),h); }
+  for (let i=0;i<2 && alive().length;i++){ const v=await die(`Encounter check · ${i?'afternoon':'morning'} (1 = encounter)`,'1d6'); if(v===1){ log('Something finds you on the road.','bad'); await encounter(await whatAppears(),h); } }
   // rations
-  if (!G.weather) rollWeather();
   const mult = G.weather.harsh ? 2 : 1;
   const need = (alive().length + G.mounts) * mult;
   if (G.rations >= need){ G.rations -= need; log(`The company eats ${need} rations${mult>1?' (harsh climate)':''}.`); }
-  else { log(`<b>Short of food.</b> ${T('Going hungry').rows[1][1]}`,'bad'); G.rations=0; for (const c of alive()) c.con--; if (G.mounts && r(3)===1){ G.mounts--; G.rations+=4; log('A mount dies; you eat it. +4 rations.','bad'); } }
+  else { log(`<b>Short of food.</b> ${T('Going hungry').rows[1][1]}`,'bad'); G.rations=0; for (const c of alive()) c.con--; if (G.mounts){ G.mounts--; G.rations+=4; log('You slaughter a mount. +4 rations.','bad'); } }
   // fire
   let fire = G.torches>=3 && !(G.weather.band==='Severe'); if (fire){ G.torches-=3; log('A fire burns through the night (3 torches).'); } else log('No fire tonight.','bad');
   // overnight checks
   let interrupted = false;
-  for (let i=0;i<2;i++) if (r(6)<=(fire?1:2) && alive().length && !G.safe){ interrupted=true; log(tag('Night check','!')+'Something comes in the dark.'); await encounter(whatAppears(),h, false, r(2)===1); }
+  if (G.safe) log('Safe walls tonight: no night checks.');
+  else for (let i=0;i<2 && alive().length;i++){ const v=await die(`Night check ${i+1} (${fire?'1':'1–2'} = encounter)`,'1d6'); if(v<=(fire?1:2)){ interrupted=true; log('Something comes in the dark.','bad'); await encounter(await whatAppears(),h, false, (await die('Do they catch you sleeping? (4–6 yes)','1d6'))>=4); } }
   // rest
   const canRest = (G.weather.band!=='Stormy' && G.weather.band!=='Severe') || G.safe;
-  for (const c of alive()){
-    if (canRest && (!interrupted || check(0,12).ok)){ c.hp=c.max; if (G.rations>0||!interrupted) c.con=Math.min(c.conMax, c.con+ (mult===1?c.conMax:1)); }
-    else c.hp = Math.min(c.max, c.hp+1);
-  }
-  log(canRest ? 'You rest and recover.' : '<span class="bad">No real rest in this weather.</span>');
-  // potions on the dying
-  for (const c of G.party) if (c.hp<=0 && c.con>0){ const p=G.loot.findIndex(x=>x.potion); if(p>=0){G.loot.splice(p,1); c.hp=c.max; log(`A potion brings ${c.name} back from the brink.`,'good');} else if (r(20)>=18){ c.hp=1; log(`${c.name} wakes, somehow.`,'good'); } else { c.con=0; log(`<b>${c.name} does not wake.</b>`,'bad'); } }
-  newDay(); checkDeath(); render();
+  if (canRest){
+    const k = interrupted ? await checks('CON to keep the rest after the interruption', alive(), SAVE.CON, 12) : alive().map(c=>({c,ok:true}));
+    for (const x of k){ if(x.ok){ x.c.hp=x.c.max; x.c.con=Math.min(x.c.conMax, x.c.con+(mult===1&&G.rations>=0?x.c.conMax:1)); } else x.c.hp=Math.min(x.c.max,x.c.hp+1); }
+    log('You rest and recover.');
+  } else { alive().forEach(c=>c.hp=Math.min(c.max,c.hp+1)); log('<span class="bad">No real rest in this weather.</span>'); }
+  // the dying
+  for (const c of G.party) if (c.hp<=0 && c.con>0 && !c.dead){ const p=G.loot.findIndex(x=>x.potion); if(p>=0){G.loot.splice(p,1); c.hp=c.max; log(`A potion brings ${c.name} back from the brink.`,'good');} else { const v=await die(`Death save for ${c.name} (18+ lives)`,'1d20'); if(v>=18){ c.hp=1; log(`${c.name} wakes, somehow.`,'good'); } else { c.con=0; log(`<b>${c.name} does not wake.</b>`,'bad'); } } }
+  checkDeath(); if (G.over) return;
+  await newDay();
 }
-function newDay(){
+async function newDay(){
   G.day++; G.mc=0; G.safe=false; G.foraged=false; G.buffs={}; G.party.forEach(c=>c.acB=0);
   if (G.day % 30 === 0){ G.season=(G.season+1)%4; log(`<b>${SEASONS[G.season]} comes.</b>`); }
   log(`Day ${G.day}`, 'day');
-  if (--G.wdays <= 0) rollWeather(); else log(`Still ${G.weather.name.toLowerCase()} (${G.weather.band}).`);
+  if (--G.wdays <= 0) await rollWeather(); else log(`Still ${G.weather.name.toLowerCase()} (${G.weather.band}).`);
 }
 
 // ---------- settlements (§15) ----------
@@ -482,11 +554,11 @@ function shop(first){
     const opts = items.map(([n,c,f])=>[`${n} — ${c} gp`, ()=>{ if(G.gold>=c){G.gold-=c;f();} draw(); }, true]);
     if (!first){
       opts.push([`Sell loot (half value)`, ()=>{ let s=0; G.loot=G.loot.filter(x=>{ if(x.potion) return true; if(Math.random()<buyer){s+=Math.floor(x.gp/2);return false;} return true;}); G.gold+=s; log(`Sold loot for ${s} gp.`,'good'); draw(); }, true]);
-      opts.push(['Inn: rest the night (2 gp each)', ()=>{ const c=2*alive().length; if(G.gold>=c){G.gold-=c; G.safe=true; G.party.forEach(x=>{if(x.con>0){x.hp=x.max;x.con=x.conMax;}}); G.weather={...G.weather,band:'Fair',harsh:false}; closeModal(); log('A roof, a bed, a hot meal. Everyone recovers fully.','good'); newDay(); render();} }]);
-      opts.push(['Ask for news (1 gp)', ()=>{ if(G.gold<1)return; G.gold--; const v=r(20), row=pick(T('Settlement events'),v); log(tag('Settlement event 1d20',v)+`<b>${row[0]}.</b> ${row[1]}`); draw(); }, true]);
+      opts.push(['Inn: rest the night (2 gp each)', ()=>{ const c=2*alive().length; if(G.gold>=c){G.gold-=c; G.safe=true; G.party.forEach(x=>{if(x.con>0){x.hp=x.max;x.con=x.conMax;}}); G.weather={...G.weather,band:'Fair',harsh:false}; closeModal(); log('A roof, a bed, a hot meal. Everyone recovers fully.','good'); newDay().then(render);} else draw(); }]);
+      opts.push(['Ask for news (1 gp)', async ()=>{ if(G.gold<1)return draw(); G.gold--; const v=await die('Settlement event','1d20'), row=pick(T('Settlement events'),v); log(`<b>${row[0]}.</b> ${row[1]}`); draw(); }]);
       if (alive().length<4 && h.band!=='Post') opts.push(['Hire a sellsword (25 gp)', ()=>{ if(G.gold>=25){G.gold-=25; const h=randomChar('Fighter'); h.gold=0; h.name+=' (sellsword)'; G.party.push(h); log('A sellsword joins the company.','good');} draw(); }, true]);
     }
-    opts.push([first?'Set out':'Leave', ()=>{ closeModal(); if(first){ log('Day 1','day'); rollWeather(); } render(); }]);
+    opts.push([first?'Set out':'Leave', ()=>{ closeModal(); if(first){ log('Day 1','day'); busy=true; rollWeather().then(()=>{busy=false;render();}); } render(); }]);
     modal(html, opts);
   };
   draw();

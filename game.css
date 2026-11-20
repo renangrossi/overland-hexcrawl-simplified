@@ -39,3 +39,7 @@ button.main{background:var(--acc);color:#fff;border-color:var(--acc)}
 .icon{font-size:18px;pointer-events:none;text-anchor:middle;dominant-baseline:central}
 @media(max-width:860px){main{grid-template-columns:1fr;height:auto}#mapwrap{height:55vh}#log{max-height:45vh}}
 #modal[hidden]{display:none}
+#log p.pending{background:#f3d9a0;padding:3px 5px;border-left:3px solid var(--acc)}
+@media(prefers-color-scheme:dark){#log p.pending{background:#4a3a1c}}
+#log .ask{font:600 13px Cond;text-transform:uppercase;letter-spacing:.04em}
+button.roll{font-size:17px;padding:10px 16px;width:100%}
