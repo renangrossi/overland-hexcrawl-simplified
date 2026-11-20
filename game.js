@@ -204,7 +204,7 @@ function render(){
   btn('Hunt', ()=>forage('hunt'), '', done0||row0[2]==='—');
   btn(G.gear.fishing?'Fish':'Fish (needs gear)', ()=>forage('fish'), '', done0||!G.gear.fishing||!(waterNear(h0)));
   if (here.feature==='Settlement') btn('Visit '+(here.fname||'settlement'), ()=>shop(false));
-  if (here.feature && here.feature!=='Settlement' && !here.done && !/Empty/.test(here.feature)) btn('Explore the '+here.feature.split(/[.;(]/)[0], ()=>exploreFeature(here));
+  if (here.feature && here.feature!=='Settlement' && !here.done && !/Empty/.test(here.feature)) btn('Explore the '+here.feature.split(/[.;(]/)[0]+' (optional)', ()=>exploreFeature(here));
   $('#legend').textContent = 'Click a highlighted neighbouring hex to move.';
 }
 const mounted = () => G.mounts >= alive().length && alive().length>0;
@@ -402,6 +402,7 @@ async function feature(h){
   if (/Trading Post|Tavern/.test(f)){ h.band='Post'; h.fname=f; f='Settlement'; }
   if (/Deep Chasm/.test(f)){ const e=await die('Chasm: which edge it runs along','1d6'); const n=nbrs(h); h.chasm=[n[e-1],n[e%6]].map(x=>key(x.q,x.r)); h.done=true; }
   h.feature=f;
+  if (f!=='Empty landscape' && f!=='Settlement' && !h.done) log('<i>Exploring it is optional: use the button, or move on.</i>');
   log(f==='Empty landscape'?'No feature: empty landscape.':`<b>${h.fname?h.band+': '+h.fname:f}.</b> ${(T('What each feature is').rows.find(x=>f.startsWith(x[0]))||['',''])[1]}`);
   render();
 }
